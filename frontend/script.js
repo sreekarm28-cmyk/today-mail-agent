@@ -24,6 +24,7 @@ let emails = [];
 let activeFilter = "All mail";
 let supabaseClient = null;
 let currentSession = null;
+let activeUserId = null;
 
 async function initAppAuth() {
   const authScreen = document.querySelector("#auth-screen");
@@ -47,20 +48,34 @@ async function initAppAuth() {
 
     const updateSession = (session) => {
       currentSession = session;
+      const nextUserId = session?.user?.id || null;
+      if (activeUserId !== nextUserId) {
+        emails = [];
+        activeFilter = "All mail";
+        activeUserId = nextUserId;
+        renderDashboard();
+      }
       const signedIn = Boolean(session);
       authScreen.hidden = signedIn;
       appShell.hidden = !signedIn;
       signOutButton.hidden = !signedIn;
       if (signedIn) {
-        gmailStatus.textContent = "Gmail connection setup is next";
+        gmailStatus.textContent = "Checking Gmail connection…";
         connectionNote.textContent = "Signed in";
-        connectButton.textContent = "Gmail setup next";
-        connectButton.disabled = true;
-        refreshButton.disabled = true;
-        document.querySelector("#empty-connect").disabled = true;
-      } else {
+        connectButton.textContent = "Connect Gmail ↗";
+        connectButton.classList.remove("connected");
         connectButton.disabled = false;
         refreshButton.disabled = true;
+        document.querySelector("#empty-connect").disabled = false;
+        void updateGmailStatus();
+      } else {
+        gmailStatus.textContent = "Connect Gmail to get started";
+        connectionNote.textContent = "Gmail not connected";
+        connectButton.textContent = "Connect Gmail ↗";
+        connectButton.classList.remove("connected");
+        connectButton.disabled = false;
+        refreshButton.disabled = true;
+        document.querySelector("#empty-connect").disabled = false;
       }
     };
 
@@ -112,6 +127,33 @@ async function apiFetch(path, options = {}) {
   return fetch(path, { ...options, headers });
 }
 
+async function updateGmailStatus() {
+  if (!currentSession) return;
+  try {
+    const response = await apiFetch("/api/gmail/status");
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || "Could not check Gmail connection.");
+    if (payload.connected) {
+      setConnected(payload.email);
+      refreshButton.disabled = false;
+      document.querySelector("#empty-connect").hidden = true;
+      if (new URLSearchParams(window.location.search).get("gmail") === "connected") {
+        window.history.replaceState({}, "", window.location.pathname);
+      }
+    } else {
+      gmailStatus.textContent = "Gmail is not connected";
+      connectionNote.textContent = "Gmail not connected";
+      connectButton.textContent = "Connect Gmail ↗";
+      connectButton.classList.remove("connected");
+      refreshButton.disabled = true;
+      document.querySelector("#empty-connect").hidden = false;
+    }
+  } catch (error) {
+    gmailStatus.textContent = error.message || "Could not check Gmail connection.";
+    refreshButton.disabled = true;
+  }
+}
+
 document.querySelector("#current-date").textContent = new Intl.DateTimeFormat("en", {
   weekday: "long", month: "long", day: "numeric",
 }).format(new Date());
@@ -131,7 +173,12 @@ async function connectGmail() {
     const response = await apiFetch("/api/connect-gmail", { method: "POST" });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.detail || "Could not connect Gmail.");
+    if (payload.authorization_url) {
+      window.location.assign(payload.authorization_url);
+      return;
+    }
     setConnected(payload.email);
+    refreshButton.disabled = false;
     await refreshEmails();
   } catch (error) {
     gmailStatus.textContent = error.message || "Could not connect Gmail.";

@@ -54,7 +54,11 @@ The `gmail.modify` scope is restricted. A public production app may need Google'
 
 Set `SUPABASE_URL` and `SUPABASE_ANON_KEY` in the hosting service's private environment settings to enable email/password app sign-in. Set `REQUIRE_APP_AUTH=true` on the hosted service so the backend refuses requests if the sign-in settings are missing. The browser receives only the URL and publishable key; the backend checks each signed-in session with Supabase Auth. In local development, leave these settings blank to keep using the existing local dashboard.
 
-This is only the first authentication step. Gmail actions are intentionally disabled when Supabase sign-in is enabled because Gmail OAuth tokens are still stored for one local account. Do not invite testers to use Gmail until per-user Google OAuth and protected token storage are implemented. The GitHub scheduled job is also postponed until it can process each user's separate Gmail connection safely.
+The Supabase sign-in identifies the app user. Each user must separately click **Connect Gmail** and approve access at Google. The server encrypts that user's Google refresh token and stores it in the `gmail_connections` table, keyed by the Supabase Auth user ID. The SQL migration is `supabase/migrations/202610120001_gmail_connections.sql`; run it in the Supabase SQL Editor before connecting Gmail. Row access is revoked from browser roles; only the backend's Supabase secret key can access the table.
+
+For a hosted Gmail connection, set these additional environment variables on Render: `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REDIRECT_URI` (exactly `https://your-render-name.onrender.com/api/connect-gmail/callback`), `SUPABASE_SECRET_KEY`, and `GMAIL_TOKEN_ENCRYPTION_KEY`. Generate a Fernet key in PowerShell with `py -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`; copy the output directly into Render and keep it private. In Google Cloud, use a **Web application** OAuth client and add that exact callback URL as an authorized redirect URI. The existing Desktop OAuth client remains for local development.
+
+Google currently classifies the requested `gmail.modify` scope as restricted. Public release may require Google verification and, because the server stores/transmits restricted Gmail data, a security assessment. Keep this as a controlled test while developing. A scheduled GitHub job is postponed until it can safely iterate over each person's separate Gmail connection.
 
 The non-secret settings used by the app are:
 
@@ -71,6 +75,11 @@ The non-secret settings used by the app are:
 | `SUPABASE_URL` | `https://your-project.supabase.co` | Optional; enables app sign-in |
 | `SUPABASE_ANON_KEY` | Supabase publishable/anon key | Optional; used by the browser for app sign-in |
 | `REQUIRE_APP_AUTH` | `true` | Set on the hosted service to require app sign-in |
+| `GOOGLE_OAUTH_CLIENT_ID` | Web OAuth client ID | Required for hosted Gmail connection |
+| `GOOGLE_OAUTH_CLIENT_SECRET` | Web OAuth client secret | Required for hosted Gmail connection; keep private |
+| `GOOGLE_OAUTH_REDIRECT_URI` | `https://your-app.onrender.com/api/connect-gmail/callback` | Required for hosted Gmail connection |
+| `SUPABASE_SECRET_KEY` | Supabase secret key (`sb_secret_...`) | Required by the backend to store encrypted user tokens; never use in the browser |
+| `GMAIL_TOKEN_ENCRYPTION_KEY` | Fernet key | Required to encrypt Gmail refresh tokens before they are stored |
 
 ### Change the model
 

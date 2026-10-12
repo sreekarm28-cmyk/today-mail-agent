@@ -101,14 +101,18 @@ CLASSIFICATION_CATEGORIES = ["Urgent Action", "Action Needed", "Important Info",
 CLASSIFICATION_BATCH_SIZE = 3
 CLASSIFICATION_BODY_MAX_CHARS = 2000
 
-def run_agent(user_request: str, conversation_history: list[dict[str, str]] | None = None) -> str:
+def run_agent(
+    user_request: str,
+    conversation_history: list[dict[str, str]] | None = None,
+    user_id: str | None = None,
+) -> str:
     """Route a request using the current page's short-lived conversation context."""
     client = get_langfuse_client()
     started = perf_counter()
     try:
         with observation(client, as_type="span", name="today-mail-agent") as trace:
             try:
-                answer = _run_agent(user_request, client, conversation_history or [])
+                answer = _run_agent(user_request, client, conversation_history or [], user_id)
                 record_metadata(trace, status="success", duration_ms=round((perf_counter() - started) * 1000))
                 return answer
             except Exception as exc:
@@ -166,17 +170,20 @@ def summarize_one_email(email: dict[str, str]) -> str:
                 pass
 
 
-def classify_recent_emails(emails: list[dict] | None = None) -> dict[str, int | str]:
+def classify_recent_emails(
+    emails: list[dict] | None = None,
+    user_id: str | None = None,
+) -> dict[str, int | str]:
     """Classify uncategorized recent emails and apply labels through a model tool call."""
     client = get_langfuse_client()
     try:
         with observation(client, as_type="span", name="classify-recent-emails") as span:
             # Create only missing category labels before classifying. Existing labels stay as-is.
-            labels = ensure_user_labels(CLASSIFICATION_CATEGORIES)
+            labels = ensure_user_labels(CLASSIFICATION_CATEGORIES, user_id)
             label_ids = {label["name"]: label["id"] for label in labels}
 
             if emails is None:
-                emails = fetch_recent_emails()
+                emails = fetch_recent_emails(user_id)
             emails_by_id = {email["id"]: email for email in emails}
             label_names_by_id = {label["id"]: label["name"] for label in labels}
             classified_names = set(CLASSIFICATION_CATEGORIES)
@@ -262,7 +269,7 @@ def classify_recent_emails(emails: list[dict] | None = None) -> dict[str, int | 
 
                     for email_id, label_name in assignment_by_id.items():
                         try:
-                            apply_user_label(email_id, label_ids[label_name], label_name)
+                            apply_user_label(email_id, label_ids[label_name], label_name, user_id)
                             email_labels = emails_by_id[email_id].setdefault("label_ids", [])
                             if label_ids[label_name] not in email_labels:
                                 email_labels.append(label_ids[label_name])
@@ -327,11 +334,11 @@ def process_gmail_notification(notification_history_id: str) -> dict[str, int | 
     }
 
 
-def _fetch_emails(client):
+def _fetch_emails(client, user_id: str | None = None):
     """Fetch emails while tracing the outcome and count, never the email content."""
     with observation(client, as_type="span", name="fetch-today-emails") as span:
         try:
-            emails = fetch_today_emails()
+            emails = fetch_today_emails(user_id)
             record_metadata(span, status="success", email_count=len(emails))
             return emails
         except Exception as exc:
@@ -339,7 +346,12 @@ def _fetch_emails(client):
             raise
 
 
-def _run_agent(user_request: str, client, conversation_history: list[dict[str, str]]) -> str:
+def _run_agent(
+    user_request: str,
+    client,
+    conversation_history: list[dict[str, str]],
+    user_id: str | None = None,
+) -> str:
     """Let the model request tools; the runtime validates and executes them."""
     history = [
         {"role": message["role"], "content": message["content"][:4000]}
@@ -355,12 +367,12 @@ def _run_agent(user_request: str, client, conversation_history: list[dict[str, s
     existing_labels: dict[str, str] = {}
 
     def fetch_tool():
-        emails = _fetch_emails(client)[:MAX_EMAILS_TO_SUMMARIZE]
+        emails = _fetch_emails(client, user_id)[:MAX_EMAILS_TO_SUMMARIZE]
         fetched_email_ids.update(email["id"] for email in emails if email.get("id"))
         return emails
 
     def labels_tool():
-        labels = list_user_labels()
+        labels = list_user_labels(user_id)
         existing_labels.update({label["name"]: label["id"] for label in labels})
         return labels
 
@@ -387,6 +399,7 @@ def _run_agent(user_request: str, client, conversation_history: list[dict[str, s
                     assignment["email_id"],
                     existing_labels[assignment["label_name"]],
                     assignment["label_name"],
+                    user_id,
                 )
                 results.append({"email_id": assignment["email_id"], "result": message})
             except Exception as exc:

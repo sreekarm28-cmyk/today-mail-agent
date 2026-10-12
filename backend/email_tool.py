@@ -91,7 +91,7 @@ def _body(message) -> str:
     return "(No readable text body available.)"
 
 
-def _credentials():
+def _credentials(user_id: str | None = None):
     """Load and refresh the local user's OAuth token, opening Google sign-in once if needed."""
     try:
         from google.auth.transport.requests import Request
@@ -99,6 +99,27 @@ def _credentials():
         from google_auth_oauthlib.flow import InstalledAppFlow
     except ImportError as exc:
         raise RuntimeError("Install requirements first: py -m pip install -r requirements.txt") from exc
+
+    if user_id:
+        from .user_tokens import get_gmail_connection
+
+        connection = get_gmail_connection(user_id)
+        if not connection:
+            raise RuntimeError("Connect your Gmail account first.")
+        client_id = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "")
+        client_secret = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", "")
+        if not client_id or not client_secret:
+            raise RuntimeError("Google web OAuth is not configured on the server.")
+        credentials = Credentials(
+            token=None,
+            refresh_token=connection["refresh_token"],
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=client_id,
+            client_secret=client_secret,
+            scopes=SCOPES,
+        )
+        credentials.refresh(Request())
+        return credentials
 
     APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
     saved_token = os.getenv(_TOKEN_KEY_NAME) or keyring.get_password(_CREDENTIAL_SERVICE, _TOKEN_KEY_NAME)
@@ -127,12 +148,14 @@ def _credentials():
     return credentials
 
 
-def _gmail_service():
+def _gmail_service(user_id: str | None = None, credentials=None):
     try:
         from googleapiclient.discovery import build
     except ImportError as exc:
         raise RuntimeError("Install requirements first: py -m pip install -r requirements.txt") from exc
-    return build("gmail", "v1", credentials=_credentials(), cache_discovery=False)
+    return build(
+        "gmail", "v1", credentials=credentials or _credentials(user_id), cache_discovery=False
+    )
 
 
 def connect_gmail_account() -> str:
@@ -142,6 +165,12 @@ def connect_gmail_account() -> str:
     except Exception as exc:
         raise RuntimeError(f"Could not connect to Gmail: {exc}") from exc
     return profile.get("emailAddress", "Gmail account connected")
+
+
+def gmail_account_email(credentials) -> str:
+    """Return the email address belonging to an OAuth credential set."""
+    profile = _gmail_service(credentials=credentials).users().getProfile(userId="me").execute()
+    return profile.get("emailAddress", "")
 
 
 def _local_timezone():
@@ -157,13 +186,13 @@ def _local_timezone():
         raise RuntimeError(f"Unknown EMAIL_TIMEZONE: {zone_name}") from exc
 
 
-def _fetch_emails_in_range(start: datetime, end: datetime) -> list[dict[str, str]]:
+def _fetch_emails_in_range(start: datetime, end: datetime, user_id: str | None = None) -> list[dict[str, str]]:
     """Fetch inbox messages in a local-time interval and return their display data."""
     local_zone = _local_timezone()
     # Search broadly, then filter using Gmail's exact received timestamp.
     search_start = (start.astimezone(timezone.utc).date() - timedelta(days=1)).strftime("%Y/%m/%d")
     limit = max(1, min(int(os.getenv("EMAIL_MAX_RESULTS", "50")), 500))
-    service = _gmail_service()
+    service = _gmail_service(user_id)
     response = service.users().messages().list(
         userId="me", q=f"in:inbox after:{search_start}", maxResults=limit
     ).execute()
@@ -205,18 +234,18 @@ def _fetch_emails_in_range(start: datetime, end: datetime) -> list[dict[str, str
     return results
 
 
-def fetch_today_emails() -> list[dict[str, str]]:
+def fetch_today_emails(user_id: str | None = None) -> list[dict[str, str]]:
     """Fetch messages received today in EMAIL_TIMEZONE from the Gmail Inbox."""
     local_zone = _local_timezone()
     now = datetime.now(local_zone)
     start = datetime.combine(now.date(), time.min, tzinfo=local_zone)
-    return _fetch_emails_in_range(start, start + timedelta(days=1))
+    return _fetch_emails_in_range(start, start + timedelta(days=1), user_id)
 
 
-def fetch_recent_emails() -> list[dict[str, str]]:
+def fetch_recent_emails(user_id: str | None = None) -> list[dict[str, str]]:
     """Fetch inbox messages received in the most recent rolling 24 hours."""
     now = datetime.now(_local_timezone())
-    return _fetch_emails_in_range(now - timedelta(hours=24), now)
+    return _fetch_emails_in_range(now - timedelta(hours=24), now, user_id)
 
 
 def start_gmail_watch() -> dict[str, str]:
@@ -303,10 +332,10 @@ def save_gmail_history_cursor(history_id: str) -> None:
     keyring.set_password(_CREDENTIAL_SERVICE, _GMAIL_HISTORY_KEY, str(history_id))
 
 
-def fetch_email_by_id(message_id: str, max_body_chars: int | None = 6000) -> dict[str, str]:
+def fetch_email_by_id(message_id: str, max_body_chars: int | None = 6000, user_id: str | None = None) -> dict[str, str]:
     """Fetch one Gmail message by ID, optionally limiting its body for model use."""
     local_zone = _local_timezone()
-    message_data = _gmail_service().users().messages().get(
+    message_data = _gmail_service(user_id).users().messages().get(
         userId="me", id=message_id, format="raw"
     ).execute()
     raw = message_data.get("raw")
@@ -333,9 +362,9 @@ def fetch_email_by_id(message_id: str, max_body_chars: int | None = 6000) -> dic
     }
 
 
-def list_user_labels() -> list[dict[str, str]]:
+def list_user_labels(user_id: str | None = None) -> list[dict[str, str]]:
     """Return labels the user created, excluding Gmail's system labels."""
-    labels = _gmail_service().users().labels().list(userId="me").execute().get("labels", [])
+    labels = _gmail_service(user_id).users().labels().list(userId="me").execute().get("labels", [])
     return [
         {"id": label["id"], "name": label["name"]}
         for label in labels
@@ -343,9 +372,9 @@ def list_user_labels() -> list[dict[str, str]]:
     ]
 
 
-def ensure_user_labels(label_names: list[str]) -> list[dict[str, str]]:
+def ensure_user_labels(label_names: list[str], user_id: str | None = None) -> list[dict[str, str]]:
     """Return existing labels and create any requested custom labels that are missing."""
-    service = _gmail_service()
+    service = _gmail_service(user_id)
     labels = service.users().labels().list(userId="me").execute().get("labels", [])
     by_name = {
         label["name"]: {"id": label["id"], "name": label["name"]}
@@ -364,9 +393,9 @@ def ensure_user_labels(label_names: list[str]) -> list[dict[str, str]]:
     return list(by_name.values())
 
 
-def apply_user_label(message_id: str, label_id: str, label_name: str) -> str:
+def apply_user_label(message_id: str, label_id: str, label_name: str, user_id: str | None = None) -> str:
     """Apply a previously verified existing user label to one Gmail message."""
-    _gmail_service().users().messages().modify(
+    _gmail_service(user_id).users().messages().modify(
         userId="me",
         id=message_id,
         body={"addLabelIds": [label_id]},

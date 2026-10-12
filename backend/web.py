@@ -1,22 +1,25 @@
 """Local web interface API for Today's Mail Agent."""
 
 import base64
+import hmac
 import json
 import os
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 from typing import Literal
 
 from .main import run_agent
 from .email_tool import (
+    SCOPES,
     connect_gmail_account,
     ensure_gmail_watch,
     fetch_email_by_id,
     fetch_recent_emails,
+    gmail_account_email,
     list_user_labels,
 )
 from .runtime import (
@@ -25,6 +28,7 @@ from .runtime import (
     process_gmail_notification,
     summarize_one_email,
 )
+from .user_tokens import get_gmail_connection, save_gmail_connection
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -81,6 +85,44 @@ class UserRequest(BaseModel):
 
 
 CATEGORIES = CLASSIFICATION_CATEGORIES
+OAUTH_STATE_COOKIE = "gmail_oauth_state"
+
+
+def _web_oauth_flow(state: str | None = None):
+    client_id = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "")
+    client_secret = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", "")
+    redirect_uri = os.getenv("GOOGLE_OAUTH_REDIRECT_URI", "")
+    if not client_id or not client_secret or not redirect_uri:
+        raise RuntimeError("Google web OAuth is not configured on the server.")
+    try:
+        from google_auth_oauthlib.flow import Flow
+    except ImportError as exc:
+        raise RuntimeError("Install the project requirements before connecting Gmail.") from exc
+
+    client_config = {
+        "web": {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "redirect_uris": [redirect_uri],
+        }
+    }
+    flow = Flow.from_client_config(client_config, scopes=SCOPES, state=state)
+    flow.redirect_uri = redirect_uri
+    return flow
+
+
+def _oauth_state_cipher():
+    from cryptography.fernet import Fernet
+
+    key = os.getenv("GMAIL_TOKEN_ENCRYPTION_KEY", "")
+    if not key:
+        raise RuntimeError("Gmail token encryption is not configured on the server.")
+    try:
+        return Fernet(key.encode("ascii"))
+    except (ValueError, UnicodeEncodeError) as exc:
+        raise RuntimeError("GMAIL_TOKEN_ENCRYPTION_KEY must be a valid Fernet key.") from exc
 
 
 @app.get("/", include_in_schema=False)
@@ -109,8 +151,6 @@ def script() -> FileResponse:
 
 @app.post("/api/summarize")
 def summarize(request: UserRequest, user: dict | None = Depends(_require_app_user)) -> dict[str, str]:
-    if user:
-        raise HTTPException(status_code=501, detail="Per-user Gmail connection is the next setup step. Email actions are disabled until then.")
     text = request.text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="Type a question about your emails first.")
@@ -119,31 +159,107 @@ def summarize(request: UserRequest, user: dict | None = Depends(_require_app_use
             {"role": message.role, "content": message.content}
             for message in request.history[-12:]
         ]
-        return {"answer": run_agent(text, history)}
+        return {"answer": run_agent(text, history, user["id"] if user else None)}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/api/connect-gmail")
-def connect_gmail(user: dict | None = Depends(_require_app_user)) -> dict[str, str]:
+def connect_gmail(
+    response: Response,
+    user: dict | None = Depends(_require_app_user),
+) -> dict[str, str]:
     if user:
-        raise HTTPException(status_code=501, detail="Per-user Gmail connection is the next setup step. Gmail actions are disabled until then.")
+        try:
+            flow = _web_oauth_flow()
+            authorization_url, state = flow.authorization_url(
+                access_type="offline",
+                include_granted_scopes="true",
+                prompt="consent",
+            )
+            state_data = json.dumps({"user_id": user["id"], "state": state}).encode("utf-8")
+            sealed_state = _oauth_state_cipher().encrypt(state_data).decode("ascii")
+            response.set_cookie(
+                OAUTH_STATE_COOKIE,
+                sealed_state,
+                max_age=600,
+                httponly=True,
+                secure=os.getenv("GOOGLE_OAUTH_REDIRECT_URI", "").startswith("https://"),
+                samesite="lax",
+                path="/",
+            )
+            return {"authorization_url": authorization_url}
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
     try:
         return {"email": connect_gmail_account()}
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.get("/api/connect-gmail/callback", include_in_schema=False)
+def connect_gmail_callback(
+    request: Request,
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+) -> RedirectResponse:
+    cookie_state = request.cookies.get(OAUTH_STATE_COOKIE)
+    redirect = RedirectResponse("/?gmail=connect_failed", status_code=303)
+    redirect.delete_cookie(OAUTH_STATE_COOKIE, path="/")
+    if error:
+        redirect = RedirectResponse("/?gmail=cancelled", status_code=303)
+        redirect.delete_cookie(OAUTH_STATE_COOKIE, path="/")
+        return redirect
+    if not cookie_state or not code or not state:
+        raise HTTPException(status_code=400, detail="Google sign-in did not return a valid response. Start again from the app.")
+    try:
+        state_data = json.loads(_oauth_state_cipher().decrypt(cookie_state.encode("ascii"), ttl=600).decode("utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Google sign-in expired. Start connecting Gmail again.") from exc
+    if not hmac.compare_digest(str(state_data.get("state", "")), state):
+        raise HTTPException(status_code=400, detail="Google sign-in could not be verified. Start connecting Gmail again.")
+    try:
+        flow = _web_oauth_flow(state=state)
+        flow.fetch_token(code=code)
+        credentials = flow.credentials
+        if not credentials.refresh_token:
+            existing = get_gmail_connection(state_data["user_id"])
+            if not existing:
+                raise RuntimeError("Google did not return a reusable permission. Try connecting again and approve access.")
+            refresh_token = existing["refresh_token"]
+        else:
+            refresh_token = credentials.refresh_token
+        gmail_email = gmail_account_email(credentials)
+        save_gmail_connection(state_data["user_id"], gmail_email, refresh_token)
+        redirect = RedirectResponse("/?gmail=connected", status_code=303)
+        redirect.delete_cookie(OAUTH_STATE_COOKIE, path="/")
+        return redirect
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Could not finish connecting Gmail. Check the Google OAuth settings and try again.") from exc
+
+
+@app.get("/api/gmail/status")
+def gmail_status(user: dict | None = Depends(_require_app_user)) -> dict[str, str | bool]:
+    if not user:
+        return {"connected": False, "email": ""}
+    connection = get_gmail_connection(user["id"])
+    return {
+        "connected": bool(connection),
+        "email": connection["email"] if connection else "",
+    }
+
+
 @app.get("/api/dashboard/emails")
 def dashboard_emails(user: dict | None = Depends(_require_app_user)) -> dict:
     """Fetch recent mail, classify uncategorized messages, and return updated labels."""
-    if user:
-        raise HTTPException(status_code=501, detail="Per-user Gmail connection is the next setup step. Gmail actions are disabled until then.")
     try:
-        ensure_gmail_watch()
-        emails = fetch_recent_emails()
-        classification = classify_recent_emails(emails)
-        labels = list_user_labels()
+        user_id = user["id"] if user else None
+        if not user_id:
+            ensure_gmail_watch()
+        emails = fetch_recent_emails(user_id)
+        classification = classify_recent_emails(emails, user_id)
+        labels = list_user_labels(user_id)
         label_names = {label["id"]: label["name"] for label in labels}
         dashboard_items = []
         for email in emails:
@@ -220,10 +336,8 @@ async def gmail_notifications(
 @app.get("/api/dashboard/emails/{message_id}")
 def dashboard_email_details(message_id: str, user: dict | None = Depends(_require_app_user)) -> dict[str, str]:
     """Fetch one full readable email body for display, without calling the model."""
-    if user:
-        raise HTTPException(status_code=501, detail="Per-user Gmail connection is the next setup step. Gmail actions are disabled until then.")
     try:
-        email = fetch_email_by_id(message_id, max_body_chars=None)
+        email = fetch_email_by_id(message_id, max_body_chars=None, user_id=user["id"] if user else None)
         email.pop("label_ids", None)
         return email
     except Exception as exc:
@@ -233,10 +347,8 @@ def dashboard_email_details(message_id: str, user: dict | None = Depends(_requir
 @app.post("/api/dashboard/emails/{message_id}/summary")
 def summarize_dashboard_email(message_id: str, user: dict | None = Depends(_require_app_user)) -> dict[str, str]:
     """Fetch and summarize only the email selected in the dashboard."""
-    if user:
-        raise HTTPException(status_code=501, detail="Per-user Gmail connection is the next setup step. Gmail actions are disabled until then.")
     try:
-        email = fetch_email_by_id(message_id)
+        email = fetch_email_by_id(message_id, user_id=user["id"] if user else None)
         return {"summary": summarize_one_email(email)}
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

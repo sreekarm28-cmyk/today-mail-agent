@@ -22,6 +22,95 @@ const emailDialog = document.querySelector("#email-dialog");
 const summaryDialog = document.querySelector("#summary-dialog");
 let emails = [];
 let activeFilter = "All mail";
+let supabaseClient = null;
+let currentSession = null;
+
+async function initAppAuth() {
+  const authScreen = document.querySelector("#auth-screen");
+  const appShell = document.querySelector(".app-shell");
+  const authForm = document.querySelector("#auth-form");
+  const authError = document.querySelector("#auth-error");
+  const authSubmit = document.querySelector("#auth-submit");
+  const authToggle = document.querySelector("#auth-toggle");
+  const signOutButton = document.querySelector("#sign-out");
+  let isSignUp = false;
+
+  try {
+    const response = await fetch("/api/config");
+    const config = await response.json();
+    if (!response.ok) throw new Error(config.detail || "Could not load app settings.");
+    if (!config.supabase_url || !config.supabase_anon_key) return;
+    if (!window.supabase?.createClient) throw new Error("Sign-in library did not load. Refresh the page and try again.");
+    supabaseClient = window.supabase.createClient(config.supabase_url, config.supabase_anon_key);
+    authScreen.hidden = false;
+    appShell.hidden = true;
+
+    const updateSession = (session) => {
+      currentSession = session;
+      const signedIn = Boolean(session);
+      authScreen.hidden = signedIn;
+      appShell.hidden = !signedIn;
+      signOutButton.hidden = !signedIn;
+      if (signedIn) {
+        gmailStatus.textContent = "Gmail connection setup is next";
+        connectionNote.textContent = "Signed in";
+        connectButton.textContent = "Gmail setup next";
+        connectButton.disabled = true;
+        refreshButton.disabled = true;
+        document.querySelector("#empty-connect").disabled = true;
+      } else {
+        connectButton.disabled = false;
+        refreshButton.disabled = true;
+      }
+    };
+
+    const { data } = await supabaseClient.auth.getSession();
+    updateSession(data.session);
+    supabaseClient.auth.onAuthStateChange((_event, session) => updateSession(session));
+
+    authToggle.addEventListener("click", () => {
+      isSignUp = !isSignUp;
+      authSubmit.textContent = isSignUp ? "Create account" : "Sign in";
+      authToggle.textContent = isSignUp ? "Already have an account? Sign in" : "Create a test account";
+      document.querySelector("#auth-password").autocomplete = isSignUp ? "new-password" : "current-password";
+      authError.textContent = "";
+    });
+    authForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      authSubmit.disabled = true;
+      authError.textContent = "";
+      const email = document.querySelector("#auth-email").value.trim();
+      const password = document.querySelector("#auth-password").value;
+      try {
+        const result = isSignUp
+          ? await supabaseClient.auth.signUp({ email, password })
+          : await supabaseClient.auth.signInWithPassword({ email, password });
+        if (result.error) throw result.error;
+        if (isSignUp && !result.data.session) {
+          authError.textContent = "Check your email to confirm your account, then sign in.";
+        }
+      } catch (error) {
+        authError.textContent = error.message || "Could not sign in.";
+      } finally {
+        authSubmit.disabled = false;
+      }
+    });
+    signOutButton.addEventListener("click", async () => {
+      await supabaseClient.auth.signOut();
+      authForm.reset();
+    });
+  } catch (error) {
+    authScreen.hidden = false;
+    appShell.hidden = true;
+    authError.textContent = error.message || "Could not initialize sign-in.";
+  }
+}
+
+async function apiFetch(path, options = {}) {
+  const headers = new Headers(options.headers || {});
+  if (currentSession?.access_token) headers.set("Authorization", `Bearer ${currentSession.access_token}`);
+  return fetch(path, { ...options, headers });
+}
 
 document.querySelector("#current-date").textContent = new Intl.DateTimeFormat("en", {
   weekday: "long", month: "long", day: "numeric",
@@ -39,7 +128,7 @@ async function connectGmail() {
   connectButton.textContent = "Opening Google…";
   gmailStatus.textContent = "Approve Gmail access in the Google window.";
   try {
-    const response = await fetch("/api/connect-gmail", { method: "POST" });
+    const response = await apiFetch("/api/connect-gmail", { method: "POST" });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.detail || "Could not connect Gmail.");
     setConnected(payload.email);
@@ -64,7 +153,7 @@ async function refreshEmails() {
   classificationStatus.className = "classification-status";
   classificationStatus.textContent = "Checking for new emails to categorize…";
   try {
-    const response = await fetch("/api/dashboard/emails");
+    const response = await apiFetch("/api/dashboard/emails");
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.detail || "Could not load your emails.");
     emails = payload.emails || [];
@@ -270,7 +359,7 @@ async function openEmail(email) {
   if (!emailDialog.open) emailDialog.showModal();
 
   try {
-    const response = await fetch(`/api/dashboard/emails/${encodeURIComponent(email.id)}`);
+    const response = await apiFetch(`/api/dashboard/emails/${encodeURIComponent(email.id)}`);
     const responseText = await response.text();
     let payload;
     try {
@@ -300,7 +389,7 @@ async function summarizeEmail(email, button) {
   document.querySelector("#dialog-summary").textContent = "Reading this email…";
   if (!summaryDialog.open) summaryDialog.showModal();
   try {
-    const response = await fetch(`/api/dashboard/emails/${encodeURIComponent(email.id)}/summary`, { method: "POST" });
+    const response = await apiFetch(`/api/dashboard/emails/${encodeURIComponent(email.id)}/summary`, { method: "POST" });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.detail || "Could not summarize this email.");
     document.querySelector("#dialog-summary").textContent = payload.summary || "No summary was returned.";
@@ -325,3 +414,4 @@ summaryDialog.addEventListener("click", (event) => {
 });
 
 renderDashboard();
+initAppAuth();

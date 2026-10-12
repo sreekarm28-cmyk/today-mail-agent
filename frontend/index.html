@@ -11,6 +11,20 @@
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
+    <section id="auth-screen" class="auth-screen" hidden>
+      <form id="auth-form" class="auth-card">
+        <div class="eyebrow">TODAY MAIL</div>
+        <h1>Sign in to continue</h1>
+        <p>Use your email and password to access your own mail workspace.</p>
+        <label for="auth-email">Email</label>
+        <input id="auth-email" name="email" type="email" autocomplete="email" required>
+        <label for="auth-password">Password</label>
+        <input id="auth-password" name="password" type="password" autocomplete="current-password" minlength="8" required>
+        <div id="auth-error" class="auth-error" role="status" aria-live="polite"></div>
+        <button id="auth-submit" class="auth-submit" type="submit">Sign in</button>
+        <button id="auth-toggle" class="auth-toggle" type="button">Create a test account</button>
+      </form>
+    </section>
     <div class="app-shell">
       <aside class="sidebar">
         <a class="brand" href="/" aria-label="Today Mail home">
@@ -34,6 +48,7 @@
           <div class="breadcrumb"><span class="breadcrumb-mark"></span><span>Inbox</span><span class="slash">/</span><span class="muted">Last 24 hours</span></div>
           <div class="top-actions">
             <span id="gmail-status" class="gmail-status">Connect Gmail to get started</span>
+            <button id="sign-out" class="auth-toggle" type="button" hidden>Sign out</button>
             <button id="connect-gmail" class="connect-button" type="button">Connect Gmail <span>↗</span></button>
             <button id="refresh-button" class="refresh-button" type="button" disabled><span class="refresh-icon">↻</span> Refresh</button>
           </div>
@@ -93,6 +108,7 @@
       <div id="dialog-summary" class="dialog-summary"></div>
       <div class="dialog-footer">Check the original email for important details.</div>
     </dialog>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <script src="/script.js" defer></script>
   </body>
 </html>

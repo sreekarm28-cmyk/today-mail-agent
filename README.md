@@ -50,6 +50,12 @@ The app saves the OAuth refresh token in Windows Credential Manager, not in the 
 
 The `gmail.modify` scope is restricted. A public production app may need Google's OAuth verification; transmitting or storing restricted Gmail data on a server can also require a security assessment. See Google's [Gmail scope guide](https://developers.google.com/workspace/gmail/api/auth/scopes) and [OAuth testing guidance](https://support.google.com/cloud/answer/15549945?hl=en).
 
+### Supabase sign-in prototype
+
+Set `SUPABASE_URL` and `SUPABASE_ANON_KEY` in the hosting service's private environment settings to enable email/password app sign-in. Set `REQUIRE_APP_AUTH=true` on the hosted service so the backend refuses requests if the sign-in settings are missing. The browser receives only the URL and publishable key; the backend checks each signed-in session with Supabase Auth. In local development, leave these settings blank to keep using the existing local dashboard.
+
+This is only the first authentication step. Gmail actions are intentionally disabled when Supabase sign-in is enabled because Gmail OAuth tokens are still stored for one local account. Do not invite testers to use Gmail until per-user Google OAuth and protected token storage are implemented. The GitHub scheduled job is also postponed until it can process each user's separate Gmail connection safely.
+
 The non-secret settings used by the app are:
 
 | Variable | Example | Required |
@@ -62,6 +68,9 @@ The non-secret settings used by the app are:
 | `OPENROUTER_MODEL` | `nvidia/nemotron-3.5-lightning:free` | No |
 | `OPENROUTER_URL` | `https://openrouter.ai/api/v1/chat/completions` | No |
 | `LANGFUSE_BASE_URL` | `https://cloud.langfuse.com` | Optional; set the URL for your Langfuse region |
+| `SUPABASE_URL` | `https://your-project.supabase.co` | Optional; enables app sign-in |
+| `SUPABASE_ANON_KEY` | Supabase publishable/anon key | Optional; used by the browser for app sign-in |
+| `REQUIRE_APP_AUTH` | `true` | Set on the hosted service to require app sign-in |
 
 ### Change the model
 

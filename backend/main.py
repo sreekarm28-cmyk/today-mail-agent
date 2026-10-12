@@ -5,9 +5,9 @@ import os
 from dotenv import load_dotenv
 import keyring
 
-# Load ordinary settings (timezone, model name, and so on) from .env. Secrets
-# are deliberately removed from the environment and loaded only from the
-# Windows credential store below.
+# Load ordinary settings (timezone, model name, and so on) from .env. A hosted
+# service can provide secrets as environment variables; locally, fall back to
+# Windows Credential Manager when one is not already set.
 load_dotenv()
 
 _CREDENTIAL_SERVICE = "today-mail-agent"
@@ -19,10 +19,13 @@ _SECRET_NAMES = (
 )
 
 for _name in _SECRET_NAMES:
-    os.environ.pop(_name, None)
-    _saved_secret = keyring.get_password(_CREDENTIAL_SERVICE, _name)
-    if _saved_secret:
-        os.environ[_name] = _saved_secret
+    if not os.getenv(_name):
+        try:
+            _saved_secret = keyring.get_password(_CREDENTIAL_SERVICE, _name)
+        except Exception:
+            _saved_secret = None
+        if _saved_secret:
+            os.environ[_name] = _saved_secret
 
 # Ignore credentials from the retired IMAP/App Password configuration.
 for _name in ("EMAIL_USERNAME", "EMAIL_PASSWORD"):

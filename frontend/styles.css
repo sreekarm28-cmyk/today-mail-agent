@@ -17,6 +17,16 @@ button { font: inherit; cursor: pointer; }
 button:disabled { cursor: wait; opacity: .58; }
 [hidden] { display: none !important; }
 
+.auth-screen { min-height: 100dvh; display: grid; place-items: center; padding: 22px; background: radial-gradient(circle at 15% 15%,#ebe7fa 0,transparent 34%),var(--canvas); }
+.auth-card { width: min(100%,380px); display: grid; gap: 11px; padding: 30px; border: 1px solid var(--line); border-radius: 18px; background: #fff; box-shadow: 0 16px 50px #30264b12; }
+.auth-card h1 { margin: 0; font: 800 25px Manrope,sans-serif; letter-spacing: -1px; }
+.auth-card p { margin: -2px 0 8px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.auth-card label { color: #686571; font-size: 10px; font-weight: 700; }
+.auth-card input { width: 100%; min-height: 40px; padding: 0 11px; border: 1px solid var(--line); border-radius: 9px; background: #fff; color: var(--ink); font: inherit; }
+.auth-submit { min-height: 40px; border: 0; border-radius: 9px; background: var(--violet); color: #fff; font-size: 11px; font-weight: 700; }
+.auth-toggle { min-height: 32px; border: 0; background: transparent; color: #6251a1; font-size: 10px; }
+.auth-error { min-height: 16px; color: #a74e43; font-size: 10px; line-height: 1.5; }
+
 .app-shell { min-height: 100dvh; display: grid; grid-template-columns: 248px minmax(0, 1fr); }
 .sidebar { position: sticky; top: 0; height: 100dvh; display: flex; flex-direction: column; padding: 25px 16px 17px; background: var(--sidebar); border-right: 1px solid #e5e3df; }
 .brand { display: flex; align-items: center; gap: 10px; padding: 0 7px; color: var(--ink); font: 800 16px Manrope, sans-serif; letter-spacing: -.8px; text-decoration: none; }

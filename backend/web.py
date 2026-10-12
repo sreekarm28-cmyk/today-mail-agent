@@ -119,7 +119,11 @@ CATEGORIES = CLASSIFICATION_CATEGORIES
 OAUTH_STATE_COOKIE = "gmail_oauth_state"
 
 
-def _web_oauth_flow(state: str | None = None):
+def _web_oauth_flow(
+    state: str | None = None,
+    code_verifier: str | None = None,
+    autogenerate_code_verifier: bool = False,
+):
     client_id = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "")
     client_secret = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", "")
     redirect_uri = os.getenv("GOOGLE_OAUTH_REDIRECT_URI", "")
@@ -139,7 +143,13 @@ def _web_oauth_flow(state: str | None = None):
             "redirect_uris": [redirect_uri],
         }
     }
-    flow = Flow.from_client_config(client_config, scopes=SCOPES, state=state)
+    flow = Flow.from_client_config(
+        client_config,
+        scopes=SCOPES,
+        state=state,
+        code_verifier=code_verifier,
+        autogenerate_code_verifier=autogenerate_code_verifier,
+    )
     flow.redirect_uri = redirect_uri
     return flow
 
@@ -202,13 +212,21 @@ def connect_gmail(
 ) -> dict[str, str]:
     if user:
         try:
-            flow = _web_oauth_flow()
+            flow = _web_oauth_flow(autogenerate_code_verifier=True)
             authorization_url, state = flow.authorization_url(
                 access_type="offline",
                 include_granted_scopes="true",
                 prompt="consent",
             )
-            state_data = json.dumps({"user_id": user["id"], "state": state}).encode("utf-8")
+            if not flow.code_verifier:
+                raise RuntimeError("Could not create the Google sign-in verifier.")
+            state_data = json.dumps(
+                {
+                    "user_id": user["id"],
+                    "state": state,
+                    "code_verifier": flow.code_verifier,
+                }
+            ).encode("utf-8")
             sealed_state = _oauth_state_cipher().encrypt(state_data).decode("ascii")
             response.set_cookie(
                 OAUTH_STATE_COOKIE,
@@ -250,9 +268,12 @@ def connect_gmail_callback(
         raise HTTPException(status_code=400, detail="Google sign-in expired. Start connecting Gmail again.") from exc
     if not hmac.compare_digest(str(state_data.get("state", "")), state):
         raise HTTPException(status_code=400, detail="Google sign-in could not be verified. Start connecting Gmail again.")
+    code_verifier = state_data.get("code_verifier")
+    if not isinstance(code_verifier, str) or not code_verifier:
+        raise HTTPException(status_code=400, detail="This Google sign-in attempt is outdated. Start connecting Gmail again.")
     stage = "Google token exchange"
     try:
-        flow = _web_oauth_flow(state=state)
+        flow = _web_oauth_flow(state=state, code_verifier=code_verifier)
         flow.fetch_token(code=code)
         credentials = flow.credentials
         if not credentials.refresh_token:

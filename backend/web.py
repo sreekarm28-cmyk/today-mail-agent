@@ -3,6 +3,7 @@
 import base64
 import hmac
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -33,6 +34,7 @@ from .user_tokens import get_gmail_connection, save_gmail_connection
 
 APP_DIR = Path(__file__).resolve().parent
 FRONTEND_DIR = APP_DIR.parent / "frontend"
+logger = logging.getLogger(__name__)
 app = FastAPI(title="Today Mail", docs_url=None, redoc_url=None)
 
 
@@ -219,23 +221,28 @@ def connect_gmail_callback(
         raise HTTPException(status_code=400, detail="Google sign-in expired. Start connecting Gmail again.") from exc
     if not hmac.compare_digest(str(state_data.get("state", "")), state):
         raise HTTPException(status_code=400, detail="Google sign-in could not be verified. Start connecting Gmail again.")
+    stage = "Google token exchange"
     try:
         flow = _web_oauth_flow(state=state)
         flow.fetch_token(code=code)
         credentials = flow.credentials
         if not credentials.refresh_token:
+            stage = "checking for an existing Gmail connection"
             existing = get_gmail_connection(state_data["user_id"])
             if not existing:
                 raise RuntimeError("Google did not return a reusable permission. Try connecting again and approve access.")
             refresh_token = existing["refresh_token"]
         else:
             refresh_token = credentials.refresh_token
+        stage = "checking the connected Gmail account"
         gmail_email = gmail_account_email(credentials)
+        stage = "saving the encrypted Gmail token to Supabase"
         save_gmail_connection(state_data["user_id"], gmail_email, refresh_token)
         redirect = RedirectResponse("/?gmail=connected", status_code=303)
         redirect.delete_cookie(OAUTH_STATE_COOKIE, path="/")
         return redirect
     except Exception as exc:
+        logger.error("Gmail OAuth callback failed during %s (%s)", stage, type(exc).__name__)
         raise HTTPException(status_code=400, detail="Could not finish connecting Gmail. Check the Google OAuth settings and try again.") from exc
 
 

@@ -38,6 +38,35 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="Today Mail", docs_url=None, redoc_url=None)
 
 
+@app.middleware("http")
+async def redact_oauth_callback_query_from_access_logs(request: Request, call_next):
+    """Keep one-time Google authorization codes out of Uvicorn access logs."""
+    is_oauth_callback = request.url.path == "/api/connect-gmail/callback"
+    try:
+        return await call_next(request)
+    finally:
+        if is_oauth_callback:
+            # FastAPI has already read the query parameters. Uvicorn logs the
+            # request scope after this middleware returns, so clear the query.
+            request.scope["query_string"] = b""
+
+
+def _safe_oauth_error_details(exc: Exception) -> str:
+    """Return only short, non-secret OAuth error fields suitable for logs."""
+    details = []
+    for field in ("error", "description"):
+        value = getattr(exc, field, None)
+        if not isinstance(value, str) or not value:
+            continue
+        safe_value = "".join(
+            character for character in value
+            if character.isalnum() or character in " _.-"
+        )[:160]
+        if safe_value:
+            details.append(f"{field}={safe_value}")
+    return " ".join(details) or "no safe provider details available"
+
+
 def _supabase_settings() -> tuple[str, str]:
     return (
         os.getenv("SUPABASE_URL", "").rstrip("/"),
@@ -242,7 +271,12 @@ def connect_gmail_callback(
         redirect.delete_cookie(OAUTH_STATE_COOKIE, path="/")
         return redirect
     except Exception as exc:
-        logger.error("Gmail OAuth callback failed during %s (%s)", stage, type(exc).__name__)
+        logger.error(
+            "Gmail OAuth callback failed during %s (%s): %s",
+            stage,
+            type(exc).__name__,
+            _safe_oauth_error_details(exc),
+        )
         raise HTTPException(status_code=400, detail="Could not finish connecting Gmail. Check the Google OAuth settings and try again.") from exc
 
 

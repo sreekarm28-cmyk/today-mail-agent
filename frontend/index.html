@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f5f4f1">
+    <title>Today Mail</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <a class="brand" href="/" aria-label="Today Mail home">
+          <span class="brand-icon"><i></i><i></i><i></i></span>
+          <span>today mail</span>
+        </a>
+        <div class="sidebar-caption">YOUR MAILSPACE</div>
+        <button class="nav-item selected" type="button"><span class="nav-symbol">▤</span> Inbox <span id="sidebar-count" class="nav-count">0</span></button>
+        <div class="side-section-title">SMART CATEGORIES</div>
+        <nav id="category-nav" class="category-nav" aria-label="Email categories"></nav>
+        <div class="sidebar-note">
+          <span class="note-spark">✳</span>
+          <b>A little more signal.</b>
+          <p>Sort your inbox, then open only what needs your attention.</p>
+        </div>
+        <div class="sidebar-bottom"><span class="status-dot"></span><span id="connection-note">Gmail not connected</span></div>
+      </aside>
+
+      <main class="main-panel">
+        <header class="topbar">
+          <div class="breadcrumb"><span class="breadcrumb-mark"></span><span>Inbox</span><span class="slash">/</span><span class="muted">Last 24 hours</span></div>
+          <div class="top-actions">
+            <span id="gmail-status" class="gmail-status">Connect Gmail to get started</span>
+            <button id="connect-gmail" class="connect-button" type="button">Connect Gmail <span>↗</span></button>
+            <button id="refresh-button" class="refresh-button" type="button" disabled><span class="refresh-icon">↻</span> Refresh</button>
+          </div>
+        </header>
+
+        <section class="dashboard-content">
+          <div class="intro-row">
+            <div>
+              <div class="eyebrow">YOUR DAILY INBOX</div>
+              <h1>Mail, <em>made clear.</em></h1>
+              <p class="intro-copy">A calm place to see what came in and what deserves your attention.</p>
+            </div>
+            <div class="date-card"><span class="date-icon">◷</span><span><b id="current-date">Today</b><small>Rolling 24-hour view</small></span></div>
+          </div>
+
+          <section class="inbox-summary" aria-label="Inbox overview">
+            <div class="summary-number"><span id="email-count">—</span><span class="summary-label">emails</span></div>
+            <span class="summary-divider"></span>
+            <div class="summary-copy"><b id="summary-title">Your recent mail, in one place</b><span id="summary-subtitle">Connect Gmail, then refresh to load your inbox.</span></div>
+            <div class="summary-decoration" aria-hidden="true"><span class="decor-circle"></span><span class="decor-ring"></span><span class="decor-star">✳</span></div>
+          </section>
+
+          <div class="section-heading">
+            <div><div class="eyebrow">THE LAST 24 HOURS</div><h2>Your emails</h2></div>
+            <div class="sort-note"><span class="sort-dot"></span> Newest first</div>
+          </div>
+
+          <nav id="filter-tabs" class="filter-tabs" aria-label="Filter emails"></nav>
+          <div id="classification-status" class="classification-status" role="status" aria-live="polite" hidden></div>
+          <div id="load-error" class="inline-message error" role="alert" hidden></div>
+          <div id="loading-state" class="loading-state" hidden><span class="loader"></span><span>Fetching and sorting uncategorized emails…</span></div>
+          <div id="email-list" class="email-list" aria-live="polite"></div>
+          <div id="empty-state" class="empty-state">
+            <div class="empty-icon">✳</div>
+            <h3>Your inbox will show up here</h3>
+            <p>Connect Gmail, then refresh to load emails received in the last 24 hours.</p>
+            <button id="empty-connect" class="empty-connect" type="button">Connect Gmail</button>
+          </div>
+          <footer class="privacy-note"><span>✳</span> Email content is sent to your configured model when you refresh or summarize. Refresh classifies only emails without a category label.</footer>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="email-dialog" class="summary-dialog email-dialog">
+      <div class="dialog-top"><div><span class="dialog-kicker">ORIGINAL EMAIL</span><h2 id="email-dialog-subject">Email</h2></div><button id="close-email-dialog" class="close-dialog" type="button" aria-label="Close email">×</button></div>
+      <div class="email-details">
+        <div><span>From</span><p id="email-dialog-from"></p></div>
+        <div id="email-dialog-to-row"><span>To</span><p id="email-dialog-to"></p></div>
+        <div id="email-dialog-cc-row" hidden><span>Cc</span><p id="email-dialog-cc"></p></div>
+        <div><span>Received</span><p id="email-dialog-received"></p></div>
+      </div>
+      <div id="email-dialog-body" class="email-dialog-body" aria-live="polite"></div>
+      <div class="dialog-footer">Email content is shown as readable text from Gmail.</div>
+    </dialog>
+    <dialog id="summary-dialog" class="summary-dialog">
+      <div class="dialog-top"><div><span class="dialog-kicker">MAIL SUMMARY</span><h2 id="dialog-subject">Email summary</h2></div><button id="close-dialog" class="close-dialog" type="button" aria-label="Close summary">×</button></div>
+      <div id="dialog-summary" class="dialog-summary"></div>
+      <div class="dialog-footer">Check the original email for important details.</div>
+    </dialog>
+    <script src="/script.js" defer></script>
+  </body>
+</html>

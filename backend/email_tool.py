@@ -1,0 +1,374 @@
+"""Read today's Gmail messages using Google OAuth and the Gmail API."""
+
+from datetime import datetime, time, timedelta, timezone
+from email import message_from_bytes
+from email.header import decode_header
+from email.utils import parsedate_to_datetime
+from html.parser import HTMLParser
+import base64
+import json
+import os
+from pathlib import Path
+import re
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+import keyring
+
+
+SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
+APP_DATA_DIR = Path(os.getenv("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "TodayMailAgent"
+OAUTH_CLIENT_FILE = APP_DATA_DIR / "credentials.json"
+_CREDENTIAL_SERVICE = "today-mail-agent"
+_TOKEN_KEY_NAME = "GOOGLE_OAUTH_TOKEN"
+_GMAIL_HISTORY_KEY = "GMAIL_HISTORY_ID"
+_GMAIL_WATCH_EXPIRATION_KEY = "GMAIL_WATCH_EXPIRATION_MS"
+
+
+class _HTMLText(HTMLParser):
+    """Collect readable text from an HTML-only email body."""
+
+    _BLOCK_TAGS = {"address", "article", "blockquote", "br", "dd", "div", "dl", "dt", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hr", "li", "main", "ol", "p", "pre", "section", "table", "tr", "ul"}
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.text = []
+        self._ignored_depth = 0
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag in {"script", "style", "head"}:
+            self._ignored_depth += 1
+        elif self._ignored_depth == 0 and tag in self._BLOCK_TAGS:
+            self.text.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"script", "style", "head"} and self._ignored_depth:
+            self._ignored_depth -= 1
+        elif self._ignored_depth == 0 and tag in self._BLOCK_TAGS:
+            self.text.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if self._ignored_depth == 0:
+            self.text.append(data)
+
+    def readable_text(self) -> str:
+        text = "".join(self.text)
+        text = re.sub(r"[\t\f\v ]+", " ", text)
+        text = re.sub(r" *\n *", "\n", text)
+        return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def _decode(value: str | None) -> str:
+    if not value:
+        return ""
+    pieces = []
+    for part, encoding in decode_header(value):
+        if isinstance(part, bytes):
+            pieces.append(part.decode(encoding or "utf-8", errors="replace"))
+        else:
+            pieces.append(part)
+    return "".join(pieces)
+
+
+def _body(message) -> str:
+    parts = message.walk() if message.is_multipart() else [message]
+    html_part = None
+    for part in parts:
+        if part.get_content_disposition() == "attachment":
+            continue
+        if part.get_content_type() == "text/plain":
+            payload = part.get_payload(decode=True)
+            if payload:
+                return payload.decode(part.get_content_charset() or "utf-8", errors="replace").strip()
+        elif part.get_content_type() == "text/html" and html_part is None:
+            html_part = part
+
+    if html_part:
+        payload = html_part.get_payload(decode=True)
+        if payload:
+            parser = _HTMLText()
+            parser.feed(payload.decode(html_part.get_content_charset() or "utf-8", errors="replace"))
+            return parser.readable_text() or "(Email has no readable text.)"
+    return "(No readable text body available.)"
+
+
+def _credentials():
+    """Load and refresh the local user's OAuth token, opening Google sign-in once if needed."""
+    try:
+        from google.auth.transport.requests import Request
+        from google.oauth2.credentials import Credentials
+        from google_auth_oauthlib.flow import InstalledAppFlow
+    except ImportError as exc:
+        raise RuntimeError("Install requirements first: py -m pip install -r requirements.txt") from exc
+
+    APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    saved_token = os.getenv(_TOKEN_KEY_NAME) or keyring.get_password(_CREDENTIAL_SERVICE, _TOKEN_KEY_NAME)
+    token_info = json.loads(saved_token) if saved_token else None
+    credentials = Credentials.from_authorized_user_info(token_info) if token_info else None
+
+    # A read-only token cannot apply labels. Start OAuth again so Google can
+    # ask the user to approve the updated permission.
+    if credentials and not set(SCOPES).issubset(set(credentials.scopes or [])):
+        credentials = None
+
+    if credentials and credentials.expired and credentials.refresh_token:
+        credentials.refresh(Request())
+    elif not credentials or not credentials.valid:
+        if not OAUTH_CLIENT_FILE.exists():
+            raise RuntimeError(
+                "Gmail OAuth is not configured. Download a Desktop app OAuth JSON file "
+                f"and save it as {OAUTH_CLIENT_FILE}."
+            )
+        flow = InstalledAppFlow.from_client_secrets_file(str(OAUTH_CLIENT_FILE), SCOPES)
+        credentials = flow.run_local_server(port=0, open_browser=True)
+
+    token_json = credentials.to_json()
+    os.environ[_TOKEN_KEY_NAME] = token_json
+    keyring.set_password(_CREDENTIAL_SERVICE, _TOKEN_KEY_NAME, token_json)
+    return credentials
+
+
+def _gmail_service():
+    try:
+        from googleapiclient.discovery import build
+    except ImportError as exc:
+        raise RuntimeError("Install requirements first: py -m pip install -r requirements.txt") from exc
+    return build("gmail", "v1", credentials=_credentials(), cache_discovery=False)
+
+
+def connect_gmail_account() -> str:
+    """Run the one-time browser consent flow and return the linked Gmail address."""
+    try:
+        profile = _gmail_service().users().getProfile(userId="me").execute()
+    except Exception as exc:
+        raise RuntimeError(f"Could not connect to Gmail: {exc}") from exc
+    return profile.get("emailAddress", "Gmail account connected")
+
+
+def _local_timezone():
+    zone_name = os.getenv("EMAIL_TIMEZONE")
+    try:
+        if not zone_name:
+            return datetime.now().astimezone().tzinfo
+        if zone_name == "Asia/Kolkata":
+            # Windows Python installations may not include the IANA timezone database.
+            return timezone(timedelta(hours=5, minutes=30), name="Asia/Kolkata")
+        return ZoneInfo(zone_name)
+    except ZoneInfoNotFoundError as exc:
+        raise RuntimeError(f"Unknown EMAIL_TIMEZONE: {zone_name}") from exc
+
+
+def _fetch_emails_in_range(start: datetime, end: datetime) -> list[dict[str, str]]:
+    """Fetch inbox messages in a local-time interval and return their display data."""
+    local_zone = _local_timezone()
+    # Search broadly, then filter using Gmail's exact received timestamp.
+    search_start = (start.astimezone(timezone.utc).date() - timedelta(days=1)).strftime("%Y/%m/%d")
+    limit = max(1, min(int(os.getenv("EMAIL_MAX_RESULTS", "50")), 500))
+    service = _gmail_service()
+    response = service.users().messages().list(
+        userId="me", q=f"in:inbox after:{search_start}", maxResults=limit
+    ).execute()
+
+    results = []
+    for item in response.get("messages", []):
+        raw_message = service.users().messages().get(
+            userId="me", id=item["id"], format="raw"
+        ).execute()
+        raw = raw_message.get("raw")
+        if not raw:
+            continue
+        padding = "=" * (-len(raw) % 4)
+        message = message_from_bytes(base64.urlsafe_b64decode(raw + padding))
+
+        internal_ms = raw_message.get("internalDate")
+        received = (
+            datetime.fromtimestamp(int(internal_ms) / 1000, tz=timezone.utc)
+            if internal_ms
+            else parsedate_to_datetime(message.get("Date", "")) if message.get("Date") else None
+        )
+        if received is None:
+            continue
+        if received.tzinfo is None:
+            received = received.replace(tzinfo=local_zone)
+        received = received.astimezone(local_zone)
+        if not start <= received < end:
+            continue
+
+        results.append({
+            "id": item["id"],
+            "from": _decode(message.get("From")),
+            "subject": _decode(message.get("Subject")) or "(No subject)",
+            "received": received.isoformat(timespec="minutes"),
+            "body": _body(message)[:6000],
+            "label_ids": raw_message.get("labelIds", []),
+        })
+
+    return results
+
+
+def fetch_today_emails() -> list[dict[str, str]]:
+    """Fetch messages received today in EMAIL_TIMEZONE from the Gmail Inbox."""
+    local_zone = _local_timezone()
+    now = datetime.now(local_zone)
+    start = datetime.combine(now.date(), time.min, tzinfo=local_zone)
+    return _fetch_emails_in_range(start, start + timedelta(days=1))
+
+
+def fetch_recent_emails() -> list[dict[str, str]]:
+    """Fetch inbox messages received in the most recent rolling 24 hours."""
+    now = datetime.now(_local_timezone())
+    return _fetch_emails_in_range(now - timedelta(hours=24), now)
+
+
+def start_gmail_watch() -> dict[str, str]:
+    """Start or renew Gmail push notifications for Inbox changes."""
+    topic_name = os.getenv("GMAIL_PUBSUB_TOPIC", "").strip()
+    if not topic_name:
+        raise RuntimeError("Set GMAIL_PUBSUB_TOPIC before enabling Gmail notifications.")
+
+    service = _gmail_service()
+    response = service.users().watch(
+        userId="me",
+        body={
+            "topicName": topic_name,
+            "labelIds": ["INBOX"],
+            "labelFilterBehavior": "INCLUDE",
+        },
+    ).execute()
+    history_id = str(response["historyId"])
+
+    # On renewals, preserve the processing cursor so any notifications not yet
+    # handled remain available through Gmail's history API.
+    if not keyring.get_password(_CREDENTIAL_SERVICE, _GMAIL_HISTORY_KEY):
+        keyring.set_password(_CREDENTIAL_SERVICE, _GMAIL_HISTORY_KEY, history_id)
+    if response.get("expiration"):
+        keyring.set_password(
+            _CREDENTIAL_SERVICE,
+            _GMAIL_WATCH_EXPIRATION_KEY,
+            str(response["expiration"]),
+        )
+    return {"history_id": history_id, "expiration_ms": str(response.get("expiration", ""))}
+
+
+def ensure_gmail_watch() -> None:
+    """Start a configured Gmail watch, or renew it when it is close to expiring."""
+    if not os.getenv("GMAIL_PUBSUB_TOPIC", "").strip():
+        return
+    expiration = keyring.get_password(_CREDENTIAL_SERVICE, _GMAIL_WATCH_EXPIRATION_KEY)
+    renew_before_ms = int(datetime.now(timezone.utc).timestamp() * 1000) + 24 * 60 * 60 * 1000
+    if not expiration or int(expiration) <= renew_before_ms:
+        start_gmail_watch()
+
+
+def gmail_history_cursor() -> str | None:
+    """Return the last Gmail history position handled by the push receiver."""
+    return keyring.get_password(_CREDENTIAL_SERVICE, _GMAIL_HISTORY_KEY)
+
+
+def fetch_inbox_changes(start_history_id: str) -> tuple[list[dict[str, str]], str]:
+    """Fetch inbox messages added since a saved Gmail history position."""
+    service = _gmail_service()
+    message_ids: set[str] = set()
+    page_token = None
+    latest_history_id = start_history_id
+
+    while True:
+        request_args = {
+            "userId": "me",
+            "startHistoryId": start_history_id,
+            "labelId": "INBOX",
+            "historyTypes": ["messageAdded"],
+            "maxResults": 500,
+        }
+        if page_token:
+            request_args["pageToken"] = page_token
+        result = service.users().history().list(**request_args).execute()
+        latest_history_id = str(result.get("historyId", latest_history_id))
+        for history in result.get("history", []):
+            for event in history.get("messagesAdded", []):
+                message = event.get("message", {})
+                if "INBOX" in message.get("labelIds", []):
+                    message_id = message.get("id")
+                    if message_id:
+                        message_ids.add(message_id)
+        page_token = result.get("nextPageToken")
+        if not page_token:
+            break
+
+    emails = [fetch_email_by_id(message_id) for message_id in message_ids]
+    return emails, latest_history_id
+
+
+def save_gmail_history_cursor(history_id: str) -> None:
+    """Save the last successfully handled Gmail history position in Credential Manager."""
+    keyring.set_password(_CREDENTIAL_SERVICE, _GMAIL_HISTORY_KEY, str(history_id))
+
+
+def fetch_email_by_id(message_id: str, max_body_chars: int | None = 6000) -> dict[str, str]:
+    """Fetch one Gmail message by ID, optionally limiting its body for model use."""
+    local_zone = _local_timezone()
+    message_data = _gmail_service().users().messages().get(
+        userId="me", id=message_id, format="raw"
+    ).execute()
+    raw = message_data.get("raw")
+    if not raw:
+        raise RuntimeError("Gmail did not return the email content.")
+    padding = "=" * (-len(raw) % 4)
+    message = message_from_bytes(base64.urlsafe_b64decode(raw + padding))
+    internal_ms = message_data.get("internalDate")
+    received = datetime.fromtimestamp(int(internal_ms) / 1000, tz=timezone.utc) if internal_ms else None
+    if received is None:
+        raise RuntimeError("Gmail did not return the email's received time.")
+    body = _body(message)
+    if max_body_chars is not None:
+        body = body[:max_body_chars]
+    return {
+        "id": message_id,
+        "from": _decode(message.get("From")),
+        "to": _decode(message.get("To")),
+        "cc": _decode(message.get("Cc")),
+        "subject": _decode(message.get("Subject")) or "(No subject)",
+        "received": received.astimezone(local_zone).isoformat(timespec="minutes"),
+        "body": body,
+        "label_ids": message_data.get("labelIds", []),
+    }
+
+
+def list_user_labels() -> list[dict[str, str]]:
+    """Return labels the user created, excluding Gmail's system labels."""
+    labels = _gmail_service().users().labels().list(userId="me").execute().get("labels", [])
+    return [
+        {"id": label["id"], "name": label["name"]}
+        for label in labels
+        if label.get("type") == "user" and label.get("id") and label.get("name")
+    ]
+
+
+def ensure_user_labels(label_names: list[str]) -> list[dict[str, str]]:
+    """Return existing labels and create any requested custom labels that are missing."""
+    service = _gmail_service()
+    labels = service.users().labels().list(userId="me").execute().get("labels", [])
+    by_name = {
+        label["name"]: {"id": label["id"], "name": label["name"]}
+        for label in labels
+        if label.get("type") == "user" and label.get("id") and label.get("name")
+    }
+
+    for name in label_names:
+        if name in by_name:
+            continue
+        created = service.users().labels().create(
+            userId="me", body={"name": name}
+        ).execute()
+        by_name[name] = {"id": created["id"], "name": created["name"]}
+
+    return list(by_name.values())
+
+
+def apply_user_label(message_id: str, label_id: str, label_name: str) -> str:
+    """Apply a previously verified existing user label to one Gmail message."""
+    _gmail_service().users().messages().modify(
+        userId="me",
+        id=message_id,
+        body={"addLabelIds": [label_id]},
+    ).execute()
+    return f"Applied the '{label_name}' label."

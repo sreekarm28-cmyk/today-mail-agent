@@ -27,6 +27,7 @@ from .runtime import (
     CLASSIFICATION_CATEGORIES,
     classify_recent_emails,
     process_gmail_notification,
+    process_scheduled_emails,
     summarize_one_email,
 )
 from .user_tokens import get_gmail_connection, save_gmail_connection
@@ -103,6 +104,17 @@ def _require_app_user(authorization: str | None = Header(default=None)) -> dict 
     if not isinstance(user, dict) or not user.get("id"):
         raise HTTPException(status_code=401, detail="Your sign-in is not valid.")
     return user
+
+
+def _verify_scheduled_job(authorization: str | None) -> None:
+    expected_token = os.getenv("SCHEDULED_JOB_TOKEN", "")
+    if not expected_token:
+        raise HTTPException(status_code=503, detail="Scheduled email processing is not configured.")
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing scheduled-job authorization.")
+    supplied_token = authorization.split(" ", 1)[1].strip()
+    if not hmac.compare_digest(supplied_token, expected_token):
+        raise HTTPException(status_code=401, detail="Invalid scheduled-job authorization.")
 
 
 class ChatMessage(BaseModel):
@@ -393,6 +405,22 @@ async def gmail_notifications(
         # A non-success response tells Pub/Sub that this notification was not handled.
         raise HTTPException(status_code=503, detail="Could not process Gmail notification.") from exc
     return Response(status_code=204)
+
+
+@app.post("/api/internal/process-recent-emails")
+def process_recent_emails_job(
+    authorization: str | None = Header(default=None),
+) -> dict[str, int | str]:
+    """Run the scheduled recent-email classification job for connected users."""
+    _verify_scheduled_job(authorization)
+    try:
+        result = process_scheduled_emails()
+    except Exception as exc:
+        logger.error("Scheduled Gmail processing could not start (%s).", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Could not start scheduled email processing.") from exc
+    if result["status"] == "partial":
+        raise HTTPException(status_code=502, detail=result)
+    return result
 
 
 @app.get("/api/dashboard/emails/{message_id}")

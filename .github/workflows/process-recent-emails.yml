@@ -1,0 +1,35 @@
+name: Process recent Gmail
+
+on:
+  schedule:
+    # GitHub schedules use UTC by default; avoid the top of the hour when possible.
+    - cron: "17,47 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: process-recent-gmail
+  cancel-in-progress: false
+
+jobs:
+  process-recent-emails:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Call the protected Render endpoint
+        env:
+          RENDER_APP_URL: ${{ secrets.RENDER_APP_URL }}
+          SCHEDULED_JOB_TOKEN: ${{ secrets.SCHEDULED_JOB_TOKEN }}
+        run: |
+          if [ -z "$RENDER_APP_URL" ] || [ -z "$SCHEDULED_JOB_TOKEN" ]; then
+            echo "Set the RENDER_APP_URL and SCHEDULED_JOB_TOKEN repository secrets."
+            exit 1
+          fi
+
+          curl --fail-with-body --silent --show-error --max-time 3500 \
+            --request POST \
+            --url "${RENDER_APP_URL%/}/api/internal/process-recent-emails" \
+            --header "Authorization: Bearer ${SCHEDULED_JOB_TOKEN}" \
+            --header "Accept: application/json"

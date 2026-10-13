@@ -1,6 +1,7 @@
 """Orchestrate the model and the Gmail tools."""
 
 import json
+import logging
 from time import perf_counter
 
 from .email_tool import (
@@ -15,6 +16,9 @@ from .email_tool import (
 )
 from .llm import chat
 from .observability import get_langfuse_client, observation, record_metadata
+from .user_tokens import list_gmail_connections
+
+logger = logging.getLogger(__name__)
 
 
 SYSTEM_PROMPT = """You are a helpful assistant that can answer general questions and help
@@ -332,6 +336,40 @@ def process_gmail_notification(notification_history_id: str) -> dict[str, int | 
         "failed": int(classification["failed"]),
         "status": "processed",
     }
+
+
+def process_scheduled_emails() -> dict[str, int | str]:
+    """Fetch and classify recent inbox messages for each connected app user."""
+    connections = list_gmail_connections()
+    result: dict[str, int | str] = {
+        "status": "success",
+        "connected_accounts": len(connections),
+        "processed_accounts": 0,
+        "emails_checked": 0,
+        "classified": 0,
+        "already_classified": 0,
+        "failed_accounts": 0,
+        "failed_emails": 0,
+    }
+
+    for connection in connections:
+        user_id = connection["user_id"]
+        try:
+            emails = fetch_recent_emails(user_id)
+            classification = classify_recent_emails(emails, user_id)
+            result["processed_accounts"] += 1
+            result["emails_checked"] += len(emails)
+            result["classified"] += int(classification["classified"])
+            result["already_classified"] += int(classification["already_classified"])
+            result["failed_emails"] += int(classification["failed"])
+        except Exception as exc:
+            # Keep processing other users; do not put mailbox data in scheduler logs.
+            logger.warning("Scheduled Gmail processing failed for one connection (%s).", type(exc).__name__)
+            result["failed_accounts"] += 1
+
+    if result["failed_accounts"] or result["failed_emails"]:
+        result["status"] = "partial"
+    return result
 
 
 def _fetch_emails(client, user_id: str | None = None):

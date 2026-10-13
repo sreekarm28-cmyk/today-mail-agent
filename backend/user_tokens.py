@@ -80,3 +80,19 @@ def get_gmail_connection(user_id: str) -> dict | None:
     except (InvalidToken, KeyError, UnicodeEncodeError) as exc:
         raise RuntimeError("The saved Gmail connection could not be unlocked. Contact the app owner.") from exc
     return {"email": row["gmail_email"], "refresh_token": refresh_token}
+
+
+def list_gmail_connections() -> list[dict[str, str]]:
+    """List app-user IDs with a connected Gmail account, without returning tokens."""
+    rows = _request(
+        "GET",
+        "gmail_connections?select=user_id&order=connected_at.asc&limit=1000",
+    )
+    if not isinstance(rows, list):
+        raise RuntimeError("Supabase returned an invalid Gmail connection list.")
+    connections = []
+    for row in rows:
+        user_id = row.get("user_id") if isinstance(row, dict) else None
+        if isinstance(user_id, str) and user_id:
+            connections.append({"user_id": user_id})
+    return connections

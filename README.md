@@ -58,7 +58,13 @@ The Supabase sign-in identifies the app user. Each user must separately click **
 
 For a hosted Gmail connection, set these additional environment variables on Render: `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REDIRECT_URI` (exactly `https://your-render-name.onrender.com/api/connect-gmail/callback`), `SUPABASE_SECRET_KEY`, and `GMAIL_TOKEN_ENCRYPTION_KEY`. Generate a Fernet key in PowerShell with `py -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`; copy the output directly into Render and keep it private. In Google Cloud, use a **Web application** OAuth client and add that exact callback URL as an authorized redirect URI. The existing Desktop OAuth client remains for local development.
 
-Google currently classifies the requested `gmail.modify` scope as restricted. Public release may require Google verification and, because the server stores/transmits restricted Gmail data, a security assessment. Keep this as a controlled test while developing. A scheduled GitHub job is postponed until it can safely iterate over each person's separate Gmail connection.
+Google currently classifies the requested `gmail.modify` scope as restricted. Public release may require Google verification and, because the server stores/transmits restricted Gmail data, a security assessment. Keep this as a controlled test while developing.
+
+### Scheduled Gmail classification
+
+The GitHub Actions workflow in `.github/workflows/process-recent-emails.yml` runs twice an hour (at minutes 17 and 47 UTC). It calls the protected Render endpoint `/api/internal/process-recent-emails`. The backend finds Gmail connections in Supabase and reuses the existing recent-email fetch and classification functions for each connected app user. Each run checks the rolling last 24 hours; Gmail category labels prevent already-classified messages from being sent to the model again. The dashboard still loads its email list when the user refreshes it.
+
+Set `SCHEDULED_JOB_TOKEN` as a private environment variable in Render, then add the same value as a GitHub Actions repository secret named `SCHEDULED_JOB_TOKEN`. Add the Render service URL as a repository secret named `RENDER_APP_URL` (for example, `https://your-app.onrender.com`). In GitHub, enable Actions for the repository. The workflow can also be started manually with **Run workflow**. A scheduled run can be delayed by GitHub, so it is not an exact clock.
 
 The non-secret settings used by the app are:
 
@@ -75,6 +81,7 @@ The non-secret settings used by the app are:
 | `SUPABASE_URL` | `https://your-project.supabase.co` | Optional; enables app sign-in |
 | `SUPABASE_ANON_KEY` | Supabase publishable/anon key | Optional; used by the browser for app sign-in |
 | `REQUIRE_APP_AUTH` | `true` | Set on the hosted service to require app sign-in |
+| `SCHEDULED_JOB_TOKEN` | Random private value | Required in Render to authenticate the GitHub scheduled workflow |
 | `GOOGLE_OAUTH_CLIENT_ID` | Web OAuth client ID | Required for hosted Gmail connection |
 | `GOOGLE_OAUTH_CLIENT_SECRET` | Web OAuth client secret | Required for hosted Gmail connection; keep private |
 | `GOOGLE_OAUTH_REDIRECT_URI` | `https://your-app.onrender.com/api/connect-gmail/callback` | Required for hosted Gmail connection |

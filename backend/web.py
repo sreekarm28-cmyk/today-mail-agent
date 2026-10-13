@@ -418,8 +418,9 @@ def process_recent_emails_job(
     except Exception as exc:
         logger.error("Scheduled Gmail processing could not start (%s).", type(exc).__name__)
         raise HTTPException(status_code=503, detail="Could not start scheduled email processing.") from exc
-    if result["status"] == "partial":
-        raise HTTPException(status_code=502, detail=result)
+    # A run with some unclassified emails is still a completed run. Return its
+    # counts so GitHub Actions records success while the unsorted items remain
+    # visible for later review or retry.
     return result
 
 

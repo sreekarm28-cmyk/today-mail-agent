@@ -17,7 +17,14 @@ OPENROUTER_MODEL = os.getenv(
 )
 
 
-def chat(messages: list[dict], tools: list[dict], *, tool_choice="auto", max_tokens=1024) -> dict:
+def chat(
+    messages: list[dict],
+    tools: list[dict],
+    *,
+    tool_choice="auto",
+    max_tokens=1024,
+    include_diagnostics=False,
+) -> dict | tuple[dict, dict]:
     """Send one non-streaming request and return the assistant message."""
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
@@ -78,13 +85,26 @@ def chat(messages: list[dict], tools: list[dict], *, tool_choice="auto", max_tok
             if not choices or not isinstance(choices[0].get("message"), dict):
                 raise RuntimeError("OpenRouter returned an unexpected response.")
 
-            message = choices[0]["message"]
+            choice = choices[0]
+            message = choice["message"]
             usage = result.get("usage") or {}
+            content = message.get("content")
+            diagnostics = {
+                "finish_reason": choice.get("finish_reason") or "unknown",
+                "output_tokens": usage.get("completion_tokens"),
+                "input_tokens": usage.get("prompt_tokens"),
+                "content_type": type(content).__name__ if content is not None else "null",
+                "content_present": bool(content),
+                "refusal_present": bool(message.get("refusal")),
+            }
             metadata = {
                 "status": "success",
                 "duration_ms": round((perf_counter() - started) * 1000),
                 "tool_count": len(tools),
                 "tool_call_count": len(message.get("tool_calls") or []),
+                "finish_reason": diagnostics["finish_reason"],
+                "content_present": diagnostics["content_present"],
+                "refusal_present": diagnostics["refusal_present"],
             }
             if usage.get("prompt_tokens") is not None:
                 metadata["input_tokens"] = usage["prompt_tokens"]
@@ -93,6 +113,8 @@ def chat(messages: list[dict], tools: list[dict], *, tool_choice="auto", max_tok
             if usage.get("cost") is not None:
                 metadata["cost_usd"] = usage["cost"]
             record_metadata(span, **metadata)
+            if include_diagnostics:
+                return message, diagnostics
             return message
         except Exception as exc:
             record_metadata(

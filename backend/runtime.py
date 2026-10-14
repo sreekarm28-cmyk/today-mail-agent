@@ -149,19 +149,25 @@ def summarize_one_email(email: dict[str, str]) -> str:
     try:
         with observation(client, as_type="span", name="summarize-one-email") as span:
             try:
-                message = chat(
+                message, diagnostics = chat(
                     [
                         {"role": "system", "content": "You summarize one selected email accurately and concisely."},
                         {"role": "user", "content": prompt},
                     ],
                     [],
                     max_tokens=300,
+                    include_diagnostics=True,
                 )
                 content = message.get("content")
                 answer = content.strip() if isinstance(content, str) else ""
                 if not answer:
+                    finish_reason = diagnostics.get("finish_reason", "unknown")
+                    output_tokens = diagnostics.get("output_tokens")
+                    refusal = diagnostics.get("refusal_present", False)
                     raise RuntimeError(
-                        "The model returned no summary text. Try again, or choose a different model."
+                        "The model returned no summary text "
+                        f"(finish_reason={finish_reason}, output_tokens={output_tokens}, "
+                        f"refusal_present={refusal})."
                     )
                 record_metadata(span, status="success")
                 return answer

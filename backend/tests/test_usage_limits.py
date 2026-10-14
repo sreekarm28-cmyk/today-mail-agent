@@ -3,6 +3,7 @@
 import unittest
 
 from fastapi import Request
+from fastapi.testclient import TestClient
 from limits import RateLimitItemPerDay, RateLimitItemPerMinute
 
 from backend import web
@@ -55,3 +56,26 @@ class UsageLimitTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_summary_endpoint_allows_two_requests_then_returns_429(monkeypatch):
+    web.limiter.reset()
+
+    def fake_authenticated_user(request: Request):
+        request.state.app_user_id = "endpoint-test-user"
+        return {"id": "endpoint-test-user"}
+
+    web.app.dependency_overrides[web._require_app_user] = fake_authenticated_user
+    monkeypatch.setattr(web, "fetch_email_by_id", lambda message_id, user_id=None: {"id": message_id})
+    monkeypatch.setattr(web, "summarize_one_email", lambda email: "A short test summary.")
+    try:
+        with TestClient(web.app) as client:
+            results = [
+                client.post(f"/api/dashboard/emails/test-{index}/summary")
+                for index in range(3)
+            ]
+        assert [response.status_code for response in results] == [200, 200, 429]
+        assert results[0].json() == {"summary": "A short test summary."}
+    finally:
+        web.app.dependency_overrides.pop(web._require_app_user, None)
+        web.limiter.reset()

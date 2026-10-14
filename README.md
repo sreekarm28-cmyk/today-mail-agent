@@ -17,7 +17,7 @@ A small Gmail dashboard that shows messages from the last 24 hours, classifies t
 2. Install dependencies:
 
    ```powershell
-   py -m pip install -r requirements.txt
+   py -m pip install -r requirements-dev.txt
    ```
 
 3. Store `OPENROUTER_API_KEY` in Windows Credential Manager. If using Langfuse, store `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` there too. Do not put secrets in `.env` or commit them.
@@ -29,6 +29,12 @@ A small Gmail dashboard that shows messages from the last 24 hours, classifies t
    ```
 
 6. Open <http://127.0.0.1:8000>, sign in if prompted, and connect Gmail.
+
+## Tests and evaluation
+
+- Run tests: `py -m pytest backend/tests -v`
+- Run the baseline and current classification evaluations: `py -m evals.run_eval --compare` (34 model calls; may use OpenRouter credits).
+- Summary rate limits are set by `MODEL_REQUESTS_PER_MINUTE` and `MODEL_REQUESTS_PER_DAY` in `backend/web.py`.
 
 ## Deploy
 

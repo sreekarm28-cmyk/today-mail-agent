@@ -20,4 +20,4 @@ This test app helps you review recent Gmail messages, sort them into categories,
 
 The app checks connected Gmail accounts about every 30 minutes, even when your browser is closed. Emails it can sort get the app's category label in Gmail. Emails it cannot sort stay unlabeled by the app. The dashboard cache is private to your account and keeps only message-list details for up to 24 hours; full message bodies are fetched from Gmail when opened.
 
-This is a test version. Please do not use it for sensitive or important email. To disconnect, use the app's Gmail disconnect option or revoke the app's access in your Google Account security settings.
+This is a test version. Please do not use it for sensitive or important email. To disconnect, go to Google Account → Security → Third-party access → remove this app.

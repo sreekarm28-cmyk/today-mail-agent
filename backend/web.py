@@ -253,11 +253,13 @@ def connect_gmail(
             )
             return {"authorization_url": authorization_url}
         except Exception as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
+            logger.exception("Could not start Gmail connection")
+            raise HTTPException(status_code=503, detail="Something went wrong. Please try again.") from exc
     try:
         return {"email": connect_gmail_account()}
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        logger.exception("Could not connect Gmail locally")
+        raise HTTPException(status_code=400, detail="Something went wrong. Please try again.") from exc
 
 
 @app.get("/api/connect-gmail/callback", include_in_schema=False)
@@ -343,7 +345,8 @@ def dashboard_emails(user: dict | None = Depends(_require_app_user)) -> dict:
             "sync_status": "cached" if user_id else "live",
         }
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        logger.exception("Could not load cached dashboard emails")
+        raise HTTPException(status_code=400, detail="Something went wrong. Please try again.") from exc
 
 
 def _to_dashboard_items(emails: list[dict], user_id: str | None) -> list[dict]:
@@ -383,7 +386,8 @@ def sync_dashboard_emails(user: dict | None = Depends(_require_app_user)) -> dic
             "sync_status": "updated",
         }
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        logger.exception("Could not sync dashboard emails")
+        raise HTTPException(status_code=400, detail="Something went wrong. Please try again.") from exc
 
 
 @app.post("/api/internal/process-recent-emails")
@@ -411,7 +415,8 @@ def dashboard_email_details(message_id: str, user: dict | None = Depends(_requir
         email.pop("label_ids", None)
         return email
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        logger.exception("Could not load dashboard email details")
+        raise HTTPException(status_code=400, detail="Something went wrong. Please try again.") from exc
 
 
 @app.post("/api/dashboard/emails/{message_id}/summary")
@@ -427,6 +432,7 @@ def summarize_dashboard_email(
         email = fetch_email_by_id(message_id, user_id=user["id"] if user else None)
         return {"summary": summarize_one_email(email)}
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        logger.exception("Could not summarize dashboard email")
+        raise HTTPException(status_code=400, detail="Something went wrong. Please try again.") from exc
 
 

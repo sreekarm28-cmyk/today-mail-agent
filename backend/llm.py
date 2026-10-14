@@ -1,12 +1,16 @@
 """Small client for OpenRouter's OpenAI-compatible chat API."""
 
 import json
+import logging
 import os
 from time import perf_counter
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from .observability import get_langfuse_client, observation, record_metadata
+
+
+logger = logging.getLogger(__name__)
 
 
 OPENROUTER_URL = os.getenv(
@@ -65,6 +69,7 @@ def chat(
                     result = json.loads(response.read())
             except HTTPError as exc:
                 detail = exc.read().decode("utf-8", errors="replace")
+                logger.error("OpenRouter returned HTTP %s: %s", exc.code, detail)
                 if exc.code == 401:
                     raise RuntimeError(
                         "OpenRouter rejected the API key. Check OPENROUTER_API_KEY."
@@ -74,7 +79,7 @@ def chat(
                         "OpenRouter has insufficient credits for this request."
                     ) from exc
                 raise RuntimeError(
-                    f"OpenRouter request failed (HTTP {exc.code}): {detail}"
+                    f"OpenRouter request failed (HTTP {exc.code}). Please try again."
                 ) from exc
             except TimeoutError as exc:
                 raise RuntimeError("OpenRouter did not respond within 2 minutes.") from exc

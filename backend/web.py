@@ -11,6 +11,9 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
 from typing import Literal
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 from .main import run_agent
 from .email_tool import (
@@ -38,7 +41,24 @@ from .user_tokens import (
 APP_DIR = Path(__file__).resolve().parent
 FRONTEND_DIR = APP_DIR.parent / "frontend"
 logger = logging.getLogger(__name__)
+MODEL_REQUESTS_PER_MINUTE = 2
+MODEL_REQUESTS_PER_DAY = 10
+MAX_CHAT_TEXT_LENGTH = 4000
 app = FastAPI(title="Today Mail", docs_url=None, redoc_url=None)
+
+
+def _rate_limit_key(request: Request) -> str:
+    """Use the verified app-user ID; use IP only for unauthenticated local mode."""
+    user_id = getattr(request.state, "app_user_id", None)
+    return f"user:{user_id}" if user_id else f"ip:{get_remote_address(request)}"
+
+
+limiter = Limiter(
+    key_func=_rate_limit_key,
+    storage_uri=os.getenv("RATE_LIMIT_STORAGE_URI", "memory://"),
+)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
 @app.middleware("http")
@@ -81,10 +101,14 @@ def _app_auth_required() -> bool:
     return os.getenv("REQUIRE_APP_AUTH", "false").strip().lower() in {"1", "true", "yes"}
 
 
-def _require_app_user(authorization: str | None = Header(default=None)) -> dict | None:
+def _require_app_user(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict | None:
     """Verify a Supabase Auth session when cloud authentication is configured."""
     url, anon_key = _supabase_settings()
     if not url and not anon_key and not _app_auth_required():
+        request.state.app_user_id = None
         return None  # Local development remains usable without Supabase.
     if not url or not anon_key:
         raise HTTPException(status_code=503, detail="Supabase sign-in is not fully configured.")
@@ -105,6 +129,7 @@ def _require_app_user(authorization: str | None = Header(default=None)) -> dict 
         raise HTTPException(status_code=401, detail="Your sign-in has expired. Please sign in again.") from exc
     if not isinstance(user, dict) or not user.get("id"):
         raise HTTPException(status_code=401, detail="Your sign-in is not valid.")
+    request.state.app_user_id = user["id"]
     return user
 
 
@@ -121,12 +146,12 @@ def _verify_scheduled_job(authorization: str | None) -> None:
 
 class ChatMessage(BaseModel):
     role: Literal["user", "assistant"]
-    content: str
+    content: str = Field(max_length=MAX_CHAT_TEXT_LENGTH)
 
 
 class UserRequest(BaseModel):
-    text: str
-    history: list[ChatMessage] = Field(default_factory=list)
+    text: str = Field(max_length=MAX_CHAT_TEXT_LENGTH)
+    history: list[ChatMessage] = Field(default_factory=list, max_length=12)
 
 
 CATEGORIES = CLASSIFICATION_CATEGORIES
@@ -205,14 +230,20 @@ def script() -> FileResponse:
 
 
 @app.post("/api/summarize")
-def summarize(request: UserRequest, user: dict | None = Depends(_require_app_user)) -> dict[str, str]:
-    text = request.text.strip()
+@limiter.shared_limit(f"{MODEL_REQUESTS_PER_MINUTE}/minute", scope="model-requests-per-minute")
+@limiter.shared_limit(f"{MODEL_REQUESTS_PER_DAY}/day", scope="model-requests-per-day")
+def summarize(
+    request: Request,
+    payload: UserRequest,
+    user: dict | None = Depends(_require_app_user),
+) -> dict[str, str]:
+    text = payload.text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="Type a question about your emails first.")
     try:
         history = [
             {"role": message.role, "content": message.content}
-            for message in request.history[-12:]
+            for message in payload.history[-12:]
         ]
         return {"answer": run_agent(text, history, user["id"] if user else None)}
     except Exception as exc:
@@ -415,7 +446,13 @@ def dashboard_email_details(message_id: str, user: dict | None = Depends(_requir
 
 
 @app.post("/api/dashboard/emails/{message_id}/summary")
-def summarize_dashboard_email(message_id: str, user: dict | None = Depends(_require_app_user)) -> dict[str, str]:
+@limiter.shared_limit(f"{MODEL_REQUESTS_PER_MINUTE}/minute", scope="model-requests-per-minute")
+@limiter.shared_limit(f"{MODEL_REQUESTS_PER_DAY}/day", scope="model-requests-per-day")
+def summarize_dashboard_email(
+    message_id: str,
+    request: Request,
+    user: dict | None = Depends(_require_app_user),
+) -> dict[str, str]:
     """Fetch and summarize only the email selected in the dashboard."""
     try:
         email = fetch_email_by_id(message_id, user_id=user["id"] if user else None)

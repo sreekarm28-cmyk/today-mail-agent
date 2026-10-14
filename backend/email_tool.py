@@ -1,6 +1,6 @@
-"""Read today's Gmail messages using Google OAuth and the Gmail API."""
+"""Read recent Gmail messages using Google OAuth and the Gmail API."""
 
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from email import message_from_bytes
 from email.header import decode_header
 from email.utils import parsedate_to_datetime
@@ -230,14 +230,6 @@ def _fetch_emails_in_range(start: datetime, end: datetime, user_id: str | None =
         })
 
     return results
-
-
-def fetch_today_emails(user_id: str | None = None) -> list[dict[str, str]]:
-    """Fetch messages received today in EMAIL_TIMEZONE from the Gmail Inbox."""
-    local_zone = _local_timezone()
-    now = datetime.now(local_zone)
-    start = datetime.combine(now.date(), time.min, tzinfo=local_zone)
-    return _fetch_emails_in_range(start, start + timedelta(days=1), user_id)
 
 
 def fetch_recent_emails(user_id: str | None = None) -> list[dict[str, str]]:

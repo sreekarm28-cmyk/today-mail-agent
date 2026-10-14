@@ -4,7 +4,6 @@ import unittest
 
 from fastapi import Request
 from limits import RateLimitItemPerDay, RateLimitItemPerMinute
-from pydantic import ValidationError
 
 from backend import web
 
@@ -22,12 +21,12 @@ class UsageLimitTests(unittest.TestCase):
     def tearDown(self):
         web.limiter.reset()
 
-    def test_chat_text_is_limited_to_4000_characters(self):
-        web.UserRequest(text="x" * web.MAX_CHAT_TEXT_LENGTH)
-        with self.assertRaises(ValidationError):
-            web.UserRequest(text="x" * (web.MAX_CHAT_TEXT_LENGTH + 1))
+    def test_only_email_summary_endpoint_is_available(self):
+        paths = {route.path for route in web.app.routes}
+        self.assertNotIn("/api/summarize", paths)
+        self.assertIn("/api/dashboard/emails/{message_id}/summary", paths)
 
-    def test_user_can_make_two_model_requests_per_minute(self):
+    def test_user_can_make_two_email_summaries_per_minute(self):
         user_key = web._rate_limit_key(_request_for_user("user-a"))
         minute_limit = RateLimitItemPerMinute(web.MODEL_REQUESTS_PER_MINUTE)
 
@@ -35,7 +34,7 @@ class UsageLimitTests(unittest.TestCase):
         self.assertTrue(web.limiter.limiter.hit(minute_limit, user_key, "model-requests-per-minute"))
         self.assertFalse(web.limiter.limiter.hit(minute_limit, user_key, "model-requests-per-minute"))
 
-    def test_user_can_make_ten_model_requests_per_day(self):
+    def test_user_can_make_ten_email_summaries_per_day(self):
         user_key = web._rate_limit_key(_request_for_user("user-daily"))
         day_limit = RateLimitItemPerDay(web.MODEL_REQUESTS_PER_DAY)
 

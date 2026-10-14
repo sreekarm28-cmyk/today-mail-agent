@@ -9,13 +9,14 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, RedirectResponse, Response
-from pydantic import BaseModel, Field
-from typing import Literal
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from .main import run_agent
+from .main import load_local_settings
+
+load_local_settings()
+
 from .email_tool import (
     SCOPES,
     connect_gmail_account,
@@ -43,7 +44,6 @@ FRONTEND_DIR = APP_DIR.parent / "frontend"
 logger = logging.getLogger(__name__)
 MODEL_REQUESTS_PER_MINUTE = 2
 MODEL_REQUESTS_PER_DAY = 10
-MAX_CHAT_TEXT_LENGTH = 4000
 app = FastAPI(title="Today Mail", docs_url=None, redoc_url=None)
 
 
@@ -118,12 +118,12 @@ def _require_app_user(
     import urllib.error
     import urllib.request
 
-    request = urllib.request.Request(
+    auth_request = urllib.request.Request(
         f"{url}/auth/v1/user",
         headers={"apikey": anon_key, "Authorization": authorization},
     )
     try:
-        with urllib.request.urlopen(request, timeout=10) as response:
+        with urllib.request.urlopen(auth_request, timeout=10) as response:
             user = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, ValueError) as exc:
         raise HTTPException(status_code=401, detail="Your sign-in has expired. Please sign in again.") from exc
@@ -142,16 +142,6 @@ def _verify_scheduled_job(authorization: str | None) -> None:
     supplied_token = authorization.split(" ", 1)[1].strip()
     if not hmac.compare_digest(supplied_token, expected_token):
         raise HTTPException(status_code=401, detail="Invalid scheduled-job authorization.")
-
-
-class ChatMessage(BaseModel):
-    role: Literal["user", "assistant"]
-    content: str = Field(max_length=MAX_CHAT_TEXT_LENGTH)
-
-
-class UserRequest(BaseModel):
-    text: str = Field(max_length=MAX_CHAT_TEXT_LENGTH)
-    history: list[ChatMessage] = Field(default_factory=list, max_length=12)
 
 
 CATEGORIES = CLASSIFICATION_CATEGORIES
@@ -227,27 +217,6 @@ def styles() -> FileResponse:
 @app.get("/script.js", include_in_schema=False)
 def script() -> FileResponse:
     return FileResponse(FRONTEND_DIR / "script.js", media_type="text/javascript")
-
-
-@app.post("/api/summarize")
-@limiter.shared_limit(f"{MODEL_REQUESTS_PER_MINUTE}/minute", scope="model-requests-per-minute")
-@limiter.shared_limit(f"{MODEL_REQUESTS_PER_DAY}/day", scope="model-requests-per-day")
-def summarize(
-    request: Request,
-    payload: UserRequest,
-    user: dict | None = Depends(_require_app_user),
-) -> dict[str, str]:
-    text = payload.text.strip()
-    if not text:
-        raise HTTPException(status_code=400, detail="Type a question about your emails first.")
-    try:
-        history = [
-            {"role": message.role, "content": message.content}
-            for message in payload.history[-12:]
-        ]
-        return {"answer": run_agent(text, history, user["id"] if user else None)}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/api/connect-gmail")

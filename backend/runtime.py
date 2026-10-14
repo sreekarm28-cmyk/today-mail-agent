@@ -2,6 +2,7 @@
 
 import json
 import logging
+from datetime import datetime, timedelta, timezone
 from time import perf_counter
 
 from .email_tool import (
@@ -9,6 +10,7 @@ from .email_tool import (
     ensure_user_labels,
     fetch_inbox_changes,
     fetch_recent_emails,
+    fetch_recent_email_summaries,
     fetch_today_emails,
     gmail_history_cursor,
     list_user_labels,
@@ -16,7 +18,11 @@ from .email_tool import (
 )
 from .llm import chat
 from .observability import get_langfuse_client, observation, record_metadata
-from .user_tokens import list_gmail_connections
+from .user_tokens import (
+    delete_expired_email_cache,
+    list_gmail_connections,
+    replace_recent_email_cache,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -340,6 +346,13 @@ def process_gmail_notification(notification_history_id: str) -> dict[str, int | 
 
 def process_scheduled_emails() -> dict[str, int | str]:
     """Fetch and classify recent inbox messages for each connected app user."""
+    cache_cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    try:
+        delete_expired_email_cache(cache_cutoff)
+    except Exception as exc:
+        # Cache cleanup must not prevent Gmail classification from running.
+        logger.warning("Could not clean expired dashboard cache (%s).", type(exc).__name__)
+
     connections = list_gmail_connections()
     result: dict[str, int | str] = {
         "status": "success",
@@ -362,6 +375,31 @@ def process_scheduled_emails() -> dict[str, int | str]:
             result["classified"] += int(classification["classified"])
             result["already_classified"] += int(classification["already_classified"])
             result["failed_emails"] += int(classification["failed"])
+            try:
+                summaries = fetch_recent_email_summaries(user_id)
+                label_names = {
+                    label["id"]: label["name"]
+                    for label in list_user_labels(user_id)
+                }
+                cache_rows = [
+                    {
+                        "id": email["id"],
+                        "from": email.get("from", ""),
+                        "subject": email.get("subject", "(No subject)"),
+                        "received": email["received"],
+                        "preview": email.get("preview", ""),
+                        "labels": [
+                            label_names[label_id]
+                            for label_id in email.get("label_ids", [])
+                            if label_id in label_names
+                        ],
+                    }
+                    for email in summaries
+                ]
+                replace_recent_email_cache(user_id, cache_rows)
+            except Exception as cache_exc:
+                # A cache issue should not undo or misreport Gmail labeling.
+                logger.warning("Could not refresh dashboard cache for one account (%s).", type(cache_exc).__name__)
         except Exception as exc:
             # Keep processing other users; do not put mailbox data in scheduler logs.
             logger.warning("Scheduled Gmail processing failed for one connection (%s).", type(exc).__name__)

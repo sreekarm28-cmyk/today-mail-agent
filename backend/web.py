@@ -6,6 +6,7 @@ import json
 import logging
 import os
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, RedirectResponse, Response
@@ -19,18 +20,23 @@ from .email_tool import (
     connect_gmail_account,
     ensure_gmail_watch,
     fetch_email_by_id,
-    fetch_recent_emails,
+    fetch_recent_email_summaries,
     gmail_account_email,
     list_user_labels,
 )
 from .runtime import (
     CLASSIFICATION_CATEGORIES,
-    classify_recent_emails,
     process_gmail_notification,
     process_scheduled_emails,
     summarize_one_email,
 )
-from .user_tokens import get_gmail_connection, save_gmail_connection
+from .user_tokens import (
+    delete_expired_email_cache,
+    get_gmail_connection,
+    get_recent_email_cache,
+    replace_recent_email_cache,
+    save_gmail_connection,
+)
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -326,30 +332,61 @@ def gmail_status(user: dict | None = Depends(_require_app_user)) -> dict[str, st
 
 @app.get("/api/dashboard/emails")
 def dashboard_emails(user: dict | None = Depends(_require_app_user)) -> dict:
-    """Fetch recent mail, classify uncategorized messages, and return updated labels."""
+    """Return this user's saved recent-email list without waiting on Gmail or the model."""
+    try:
+        user_id = user["id"] if user else None
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        if user_id:
+            delete_expired_email_cache(cutoff, user_id)
+            dashboard_items = get_recent_email_cache(user_id, cutoff)
+        else:
+            dashboard_items = []
+        return {
+            "emails": dashboard_items,
+            "categories": CATEGORIES,
+            "sync_status": "cached" if user_id else "live",
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _to_dashboard_items(emails: list[dict], user_id: str | None) -> list[dict]:
+    labels = list_user_labels(user_id)
+    label_names = {label["id"]: label["name"] for label in labels}
+    dashboard_items = []
+    for email in emails:
+        dashboard_items.append({
+            "id": email["id"],
+            "from": email.get("from", ""),
+            "subject": email.get("subject", "(No subject)"),
+            "received": email["received"],
+            "labels": email.get("labels") or [
+                label_names[label_id]
+                for label_id in email.get("label_ids", [])
+                if label_id in label_names
+            ],
+            "preview": email.get("preview") or " ".join(email.get("body", "").split())[:240],
+        })
+    return dashboard_items
+
+
+@app.post("/api/dashboard/sync")
+def sync_dashboard_emails(user: dict | None = Depends(_require_app_user)) -> dict:
+    """Fetch lightweight Gmail metadata, update the per-user Supabase cache, and return it."""
     try:
         user_id = user["id"] if user else None
         if not user_id:
             ensure_gmail_watch()
-        emails = fetch_recent_emails(user_id)
-        classification = classify_recent_emails(emails, user_id)
-        labels = list_user_labels(user_id)
-        label_names = {label["id"]: label["name"] for label in labels}
-        dashboard_items = []
-        for email in emails:
-            dashboard_items.append({
-                "id": email["id"],
-                "from": email["from"],
-                "subject": email["subject"],
-                "received": email["received"],
-                "labels": [label_names[label_id] for label_id in email.get("label_ids", []) if label_id in label_names],
-                "preview": " ".join(email.get("body", "").split())[:240],
-            })
+        emails = fetch_recent_email_summaries(user_id)
+        dashboard_items = _to_dashboard_items(emails, user_id)
+        if user_id:
+            cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+            delete_expired_email_cache(cutoff, user_id)
+            replace_recent_email_cache(user_id, dashboard_items)
         return {
             "emails": dashboard_items,
             "categories": CATEGORIES,
-            "available_labels": list(label_names.values()),
-            "classification": classification,
+            "sync_status": "updated",
         }
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

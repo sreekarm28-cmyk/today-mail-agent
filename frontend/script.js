@@ -13,8 +13,7 @@ const emailList = document.querySelector("#email-list");
 const emptyState = document.querySelector("#empty-state");
 const loadingState = document.querySelector("#loading-state");
 const loadError = document.querySelector("#load-error");
-const refreshButton = document.querySelector("#refresh-button");
-const classificationStatus = document.querySelector("#classification-status");
+const syncStatus = document.querySelector("#sync-status");
 const connectButton = document.querySelector("#connect-gmail");
 const gmailStatus = document.querySelector("#gmail-status");
 const connectionNote = document.querySelector("#connection-note");
@@ -25,6 +24,12 @@ let activeFilter = "All mail";
 let supabaseClient = null;
 let currentSession = null;
 let activeUserId = null;
+let dashboardLoadedUserId = null;
+let gmailConnected = false;
+let syncInFlight = false;
+let lastSyncAt = 0;
+let autoSyncTimer = null;
+const AUTO_SYNC_INTERVAL_MS = 5 * 60 * 1000;
 
 async function initAppAuth() {
   const authScreen = document.querySelector("#auth-screen");
@@ -53,6 +58,9 @@ async function initAppAuth() {
         emails = [];
         activeFilter = "All mail";
         activeUserId = nextUserId;
+        dashboardLoadedUserId = null;
+        gmailConnected = false;
+        lastSyncAt = 0;
         renderDashboard();
       }
       const signedIn = Boolean(session);
@@ -65,7 +73,6 @@ async function initAppAuth() {
         connectButton.textContent = "Connect Gmail ↗";
         connectButton.classList.remove("connected");
         connectButton.disabled = false;
-        refreshButton.disabled = true;
         document.querySelector("#empty-connect").disabled = false;
         void updateGmailStatus();
       } else {
@@ -74,7 +81,7 @@ async function initAppAuth() {
         connectButton.textContent = "Connect Gmail ↗";
         connectButton.classList.remove("connected");
         connectButton.disabled = false;
-        refreshButton.disabled = true;
+        gmailConnected = false;
         document.querySelector("#empty-connect").disabled = false;
       }
     };
@@ -134,23 +141,26 @@ async function updateGmailStatus() {
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.detail || "Could not check Gmail connection.");
     if (payload.connected) {
+      gmailConnected = true;
       setConnected(payload.email);
-      refreshButton.disabled = false;
       document.querySelector("#empty-connect").hidden = true;
+      const userId = currentSession?.user?.id || "local-user";
+      if (dashboardLoadedUserId !== userId) void startDashboard(userId);
       if (new URLSearchParams(window.location.search).get("gmail") === "connected") {
         window.history.replaceState({}, "", window.location.pathname);
       }
     } else {
+      gmailConnected = false;
+      dashboardLoadedUserId = null;
       gmailStatus.textContent = "Gmail is not connected";
       connectionNote.textContent = "Gmail not connected";
       connectButton.textContent = "Connect Gmail ↗";
       connectButton.classList.remove("connected");
-      refreshButton.disabled = true;
       document.querySelector("#empty-connect").hidden = false;
     }
   } catch (error) {
     gmailStatus.textContent = error.message || "Could not check Gmail connection.";
-    refreshButton.disabled = true;
+    gmailConnected = false;
   }
 }
 
@@ -178,8 +188,9 @@ async function connectGmail() {
       return;
     }
     setConnected(payload.email);
-    refreshButton.disabled = false;
-    await refreshEmails();
+    gmailConnected = true;
+    dashboardLoadedUserId = null;
+    await startDashboard(currentSession?.user?.id || "local-user");
   } catch (error) {
     gmailStatus.textContent = error.message || "Could not connect Gmail.";
     connectionNote.textContent = "Gmail not connected";
@@ -190,42 +201,77 @@ async function connectGmail() {
   }
 }
 
-async function refreshEmails() {
-  refreshButton.disabled = true;
-  refreshButton.classList.add("spinning");
-  loadingState.hidden = false;
-  emptyState.hidden = true;
+async function loadCachedEmails() {
+  const response = await apiFetch("/api/dashboard/emails");
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.detail || "Could not load saved emails.");
+  emails = payload.emails || [];
+  renderDashboard();
+  loadingState.hidden = true;
+}
+
+async function syncEmails() {
+  if (syncInFlight || !gmailConnected) return;
+  syncInFlight = true;
   loadError.hidden = true;
-  classificationStatus.hidden = false;
-  classificationStatus.className = "classification-status";
-  classificationStatus.textContent = "Checking for new emails to categorize…";
+  syncStatus.hidden = false;
+  syncStatus.className = "sync-status";
+  syncStatus.textContent = emails.length ? "Checking Gmail for new messages…" : "Loading recent emails…";
+  if (!emails.length) {
+    loadingState.hidden = false;
+    emptyState.hidden = true;
+  }
   try {
-    const response = await apiFetch("/api/dashboard/emails");
+    const response = await apiFetch("/api/dashboard/sync", { method: "POST" });
     const payload = await response.json();
-    if (!response.ok) throw new Error(payload.detail || "Could not load your emails.");
+    if (!response.ok) throw new Error(payload.detail || "Could not check Gmail for new emails.");
     emails = payload.emails || [];
     renderDashboard();
-    const result = payload.classification || {};
-    const parts = [
-      `${result.classified || 0} ${result.classified === 1 ? "email" : "emails"} labeled`,
-      `${result.already_classified || 0} already categorized`,
-    ];
-    if (result.failed) parts.push(`${result.failed} could not be labeled`);
-    classificationStatus.textContent = parts.join(" · ") + (result.message ? `. ${result.message}` : ".");
-    if (result.failed) classificationStatus.classList.add("has-error");
-    refreshButton.disabled = false;
+    lastSyncAt = Date.now();
+    syncStatus.textContent = "Inbox updated · Checks automatically every 5 minutes.";
     gmailStatus.textContent = "Gmail inbox synced";
     connectionNote.textContent = "Gmail connected";
   } catch (error) {
-    showError(error.message || "Could not load your emails.");
-    classificationStatus.classList.add("has-error");
-    classificationStatus.textContent = error.message || "Could not load and categorize your emails.";
-    emails = [];
-    renderDashboard();
+    syncStatus.classList.add("has-error");
+    syncStatus.textContent = emails.length
+      ? "Could not check for new mail. Showing your saved emails."
+      : (error.message || "Could not load your emails.");
+    if (!emails.length) {
+      showError(error.message || "Could not load your emails.");
+      renderDashboard();
+    }
   } finally {
     loadingState.hidden = true;
-    refreshButton.disabled = false;
-    refreshButton.classList.remove("spinning");
+    syncInFlight = false;
+  }
+}
+
+async function startDashboard(userId) {
+  if (dashboardLoadedUserId === userId) return;
+  dashboardLoadedUserId = userId;
+  loadingState.hidden = false;
+  emptyState.hidden = true;
+  syncStatus.hidden = false;
+  syncStatus.textContent = "Loading saved emails…";
+  try {
+    await loadCachedEmails();
+    syncStatus.textContent = emails.length
+      ? "Showing saved emails · Checking for updates…"
+      : "Checking Gmail for recent emails…";
+  } catch {
+    // Continue to Gmail even if the cache is temporarily unavailable.
+    emails = [];
+  }
+  await syncEmails();
+  if (!autoSyncTimer) {
+    autoSyncTimer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void syncEmails();
+    }, AUTO_SYNC_INTERVAL_MS);
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible" && Date.now() - lastSyncAt > 60_000) {
+        void syncEmails();
+      }
+    });
   }
 }
 
@@ -374,7 +420,7 @@ function renderDashboard() {
     : "Your recent mail, in one place";
   document.querySelector("#summary-subtitle").textContent = emails.length
     ? "Use a category to narrow the list, or summarize one email."
-    : "Connect Gmail, then refresh to load your inbox.";
+    : "Connect Gmail to load your recent inbox automatically.";
   const shown = activeFilter === "All mail"
     ? emails
     : emails.filter((email) => matchingCategory(email) === activeFilter);
@@ -388,7 +434,7 @@ function renderDashboard() {
     document.querySelector("#empty-connect").hidden = true;
   } else {
     emptyState.querySelector("h3").textContent = "Your inbox will show up here";
-    emptyState.querySelector("p").textContent = "Connect Gmail, then refresh to load emails received in the last 24 hours.";
+    emptyState.querySelector("p").textContent = "Connect Gmail to load messages from the last 24 hours automatically.";
     document.querySelector("#empty-connect").hidden = false;
   }
 }
@@ -450,7 +496,6 @@ async function summarizeEmail(email, button) {
 
 connectButton.addEventListener("click", connectGmail);
 document.querySelector("#empty-connect").addEventListener("click", connectGmail);
-refreshButton.addEventListener("click", refreshEmails);
 document.querySelector("#close-email-dialog").addEventListener("click", () => emailDialog.close());
 emailDialog.addEventListener("click", (event) => {
   if (event.target === emailDialog) emailDialog.close();

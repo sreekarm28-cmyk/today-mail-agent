@@ -248,6 +248,47 @@ def fetch_recent_emails(user_id: str | None = None) -> list[dict[str, str]]:
     return _fetch_emails_in_range(now - timedelta(hours=24), now, user_id)
 
 
+def fetch_recent_email_summaries(user_id: str | None = None) -> list[dict[str, str | list[str]]]:
+    """Fetch lightweight inbox metadata for the dashboard, without email bodies."""
+    local_zone = _local_timezone()
+    now = datetime.now(local_zone)
+    start = now - timedelta(hours=24)
+    search_start = (start.astimezone(timezone.utc).date() - timedelta(days=1)).strftime("%Y/%m/%d")
+    limit = max(1, min(int(os.getenv("EMAIL_MAX_RESULTS", "50")), 500))
+    service = _gmail_service(user_id)
+    response = service.users().messages().list(
+        userId="me", q=f"in:inbox after:{search_start}", maxResults=limit
+    ).execute()
+
+    results: list[dict[str, str | list[str]]] = []
+    for item in response.get("messages", []):
+        message = service.users().messages().get(
+            userId="me",
+            id=item["id"],
+            format="metadata",
+            metadataHeaders=["From", "Subject"],
+        ).execute()
+        internal_ms = message.get("internalDate")
+        if not internal_ms:
+            continue
+        received = datetime.fromtimestamp(int(internal_ms) / 1000, tz=timezone.utc).astimezone(local_zone)
+        if not start <= received <= now:
+            continue
+        headers = {
+            header.get("name", "").lower(): header.get("value", "")
+            for header in message.get("payload", {}).get("headers", [])
+        }
+        results.append({
+            "id": item["id"],
+            "from": _decode(headers.get("from")),
+            "subject": _decode(headers.get("subject")) or "(No subject)",
+            "received": received.isoformat(timespec="minutes"),
+            "preview": message.get("snippet", ""),
+            "label_ids": message.get("labelIds", []),
+        })
+    return results
+
+
 def start_gmail_watch() -> dict[str, str]:
     """Start or renew Gmail push notifications for Inbox changes."""
     topic_name = os.getenv("GMAIL_PUBSUB_TOPIC", "").strip()

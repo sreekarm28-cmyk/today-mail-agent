@@ -50,7 +50,6 @@
             <span id="gmail-status" class="gmail-status">Connect Gmail to get started</span>
             <button id="sign-out" class="auth-toggle" type="button" hidden>Sign out</button>
             <button id="connect-gmail" class="connect-button" type="button">Connect Gmail <span>↗</span></button>
-            <button id="refresh-button" class="refresh-button" type="button" disabled><span class="refresh-icon">↻</span> Refresh</button>
           </div>
         </header>
 
@@ -67,7 +66,7 @@
           <section class="inbox-summary" aria-label="Inbox overview">
             <div class="summary-number"><span id="email-count">—</span><span class="summary-label">emails</span></div>
             <span class="summary-divider"></span>
-            <div class="summary-copy"><b id="summary-title">Your recent mail, in one place</b><span id="summary-subtitle">Connect Gmail, then refresh to load your inbox.</span></div>
+            <div class="summary-copy"><b id="summary-title">Your recent mail, in one place</b><span id="summary-subtitle">Connect Gmail to load your recent inbox automatically.</span></div>
             <div class="summary-decoration" aria-hidden="true"><span class="decor-circle"></span><span class="decor-ring"></span><span class="decor-star">✳</span></div>
           </section>
 
@@ -77,17 +76,17 @@
           </div>
 
           <nav id="filter-tabs" class="filter-tabs" aria-label="Filter emails"></nav>
-          <div id="classification-status" class="classification-status" role="status" aria-live="polite" hidden></div>
+          <div id="sync-status" class="sync-status" role="status" aria-live="polite" hidden></div>
           <div id="load-error" class="inline-message error" role="alert" hidden></div>
-          <div id="loading-state" class="loading-state" hidden><span class="loader"></span><span>Fetching and sorting uncategorized emails…</span></div>
+          <div id="loading-state" class="loading-state" hidden><span class="loader"></span><span>Loading recent emails…</span></div>
           <div id="email-list" class="email-list" aria-live="polite"></div>
           <div id="empty-state" class="empty-state">
             <div class="empty-icon">✳</div>
             <h3>Your inbox will show up here</h3>
-            <p>Connect Gmail, then refresh to load emails received in the last 24 hours.</p>
+            <p>Connect Gmail to load messages from the last 24 hours automatically.</p>
             <button id="empty-connect" class="empty-connect" type="button">Connect Gmail</button>
           </div>
-          <footer class="privacy-note"><span>✳</span> Email content is sent to your configured model when you refresh or summarize. Refresh classifies only emails without a category label.</footer>
+          <footer class="privacy-note"><span>✳</span> Recent email details are cached securely for 24 hours. Gmail labels update automatically; full message content loads when opened.</footer>
         </section>
       </main>
     </div>

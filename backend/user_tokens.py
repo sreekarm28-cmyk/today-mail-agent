@@ -1,4 +1,4 @@
-"""Encrypted per-user Gmail refresh-token storage in Supabase."""
+"""Per-user Gmail connection and short-lived email cache storage in Supabase."""
 
 import json
 import os
@@ -27,7 +27,7 @@ def _fernet() -> Fernet:
         raise RuntimeError("GMAIL_TOKEN_ENCRYPTION_KEY must be a valid Fernet key.") from exc
 
 
-def _request(method: str, path: str, payload: dict | None = None, prefer: str | None = None):
+def _request(method: str, path: str, payload: dict | list | None = None, prefer: str | None = None):
     project_url, secret_key = _settings()
     headers = {
         "apikey": secret_key,
@@ -48,7 +48,7 @@ def _request(method: str, path: str, payload: dict | None = None, prefer: str | 
             raw = response.read()
             return json.loads(raw.decode("utf-8")) if raw else None
     except (HTTPError, URLError, ValueError) as exc:
-        raise RuntimeError("Could not safely access the Gmail connection in Supabase.") from exc
+        raise RuntimeError("Could not safely access Supabase data.") from exc
 
 
 def save_gmail_connection(user_id: str, email: str, refresh_token: str) -> None:
@@ -96,3 +96,69 @@ def list_gmail_connections() -> list[dict[str, str]]:
         if isinstance(user_id, str) and user_id:
             connections.append({"user_id": user_id})
     return connections
+
+
+def get_recent_email_cache(user_id: str, cutoff_iso: str) -> list[dict]:
+    """Return this user's cached dashboard messages newer than the cutoff."""
+    user_filter = quote(user_id, safe="")
+    cutoff_filter = quote(cutoff_iso, safe="")
+    path = (
+        "recent_emails?select=gmail_message_id,sender,subject,received_at,preview,labels"
+        f"&user_id=eq.{user_filter}&received_at=gte.{cutoff_filter}"
+        "&order=received_at.desc&limit=500"
+    )
+    rows = _request("GET", path)
+    if not isinstance(rows, list):
+        raise RuntimeError("Supabase returned an invalid email cache response.")
+    return [
+        {
+            "id": row["gmail_message_id"],
+            "from": row.get("sender", ""),
+            "subject": row.get("subject", "(No subject)"),
+            "received": row["received_at"],
+            "preview": row.get("preview", ""),
+            "labels": row.get("labels", []),
+        }
+        for row in rows
+    ]
+
+
+def save_recent_email_cache(user_id: str, emails: list[dict]) -> None:
+    """Upsert lightweight dashboard fields; never persist full email bodies."""
+    if not emails:
+        return
+    rows = []
+    for email in emails:
+        rows.append({
+            "user_id": user_id,
+            "gmail_message_id": email["id"],
+            "sender": email.get("from", ""),
+            "subject": email.get("subject", "(No subject)"),
+            "received_at": email["received"],
+            "preview": email.get("preview", ""),
+            "labels": email.get("labels", []),
+        })
+    _request(
+        "POST",
+        "recent_emails?on_conflict=user_id,gmail_message_id",
+        rows,
+        prefer="resolution=merge-duplicates,return=minimal",
+    )
+
+
+def replace_recent_email_cache(user_id: str, emails: list[dict]) -> None:
+    """Replace one user's rolling dashboard snapshot with the latest Gmail inbox view."""
+    _request(
+        "DELETE",
+        f"recent_emails?user_id=eq.{quote(user_id, safe='')}",
+        prefer="return=minimal",
+    )
+    save_recent_email_cache(user_id, emails)
+
+
+def delete_expired_email_cache(cutoff_iso: str, user_id: str | None = None) -> None:
+    """Delete cached messages older than the cutoff, globally or for one user."""
+    path = f"recent_emails?received_at=lt.{quote(cutoff_iso, safe='')}"
+    if user_id:
+        path += f"&user_id=eq.{quote(user_id, safe='')}"
+    _request("DELETE", path, prefer="return=minimal")

@@ -298,5 +298,3 @@ def process_scheduled_emails() -> dict[str, int | str]:
     if result["failed_accounts"] or result["failed_emails"]:
         result["status"] = "partial"
     return result
-
-\n

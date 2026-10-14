@@ -1,6 +1,5 @@
 """Local web interface API for Today's Mail Agent."""
 
-import base64
 import hmac
 import json
 import logging
@@ -11,14 +10,12 @@ from datetime import datetime, timedelta, timezone
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
-from starlette.concurrency import run_in_threadpool
 from typing import Literal
 
 from .main import run_agent
 from .email_tool import (
     SCOPES,
     connect_gmail_account,
-    ensure_gmail_watch,
     fetch_email_by_id,
     fetch_recent_email_summaries,
     gmail_account_email,
@@ -26,7 +23,6 @@ from .email_tool import (
 )
 from .runtime import (
     CLASSIFICATION_CATEGORIES,
-    process_gmail_notification,
     process_scheduled_emails,
     summarize_one_email,
 )
@@ -375,8 +371,6 @@ def sync_dashboard_emails(user: dict | None = Depends(_require_app_user)) -> dic
     """Fetch lightweight Gmail metadata, update the per-user Supabase cache, and return it."""
     try:
         user_id = user["id"] if user else None
-        if not user_id:
-            ensure_gmail_watch()
         emails = fetch_recent_email_summaries(user_id)
         dashboard_items = _to_dashboard_items(emails, user_id)
         if user_id:
@@ -390,58 +384,6 @@ def sync_dashboard_emails(user: dict | None = Depends(_require_app_user)) -> dic
         }
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-def _verify_pubsub_request(authorization: str | None) -> None:
-    """Verify the OIDC token configured on the Pub/Sub push subscription."""
-    audience = os.getenv("PUBSUB_PUSH_AUDIENCE", "").strip()
-    expected_email = os.getenv("PUBSUB_PUSH_SERVICE_ACCOUNT", "").strip()
-    if not audience or not expected_email:
-        raise HTTPException(status_code=503, detail="Pub/Sub push authentication is not configured.")
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Missing Pub/Sub authorization token.")
-
-    token = authorization.split(" ", 1)[1].strip()
-    try:
-        from google.auth.transport.requests import Request as GoogleRequest
-        from google.oauth2 import id_token
-
-        claims = id_token.verify_oauth2_token(token, GoogleRequest(), audience=audience)
-    except Exception as exc:
-        raise HTTPException(status_code=401, detail="Invalid Pub/Sub authorization token.") from exc
-    if claims.get("email") != expected_email or claims.get("email_verified") is not True:
-        raise HTTPException(status_code=401, detail="Pub/Sub service account did not match the configured account.")
-
-
-@app.post("/api/gmail/notifications", status_code=204)
-async def gmail_notifications(
-    request: Request,
-    authorization: str | None = Header(default=None),
-) -> Response:
-    """Receive authenticated Gmail change notifications delivered through Pub/Sub."""
-    if _supabase_settings()[0]:
-        raise HTTPException(status_code=503, detail="Multi-user Gmail processing is not configured yet.")
-    await run_in_threadpool(_verify_pubsub_request, authorization)
-    try:
-        push_body = await request.json()
-        encoded_data = push_body["message"]["data"]
-        notification = json.loads(base64.b64decode(encoded_data, validate=True).decode("utf-8"))
-        notification_email = notification["emailAddress"]
-        notification_history_id = str(notification["historyId"])
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail="Invalid Gmail notification payload.") from exc
-
-    try:
-        connected_email = await run_in_threadpool(connect_gmail_account)
-        if notification_email.lower() != connected_email.lower():
-            raise HTTPException(status_code=403, detail="Notification is for a different Gmail account.")
-        await run_in_threadpool(process_gmail_notification, notification_history_id)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        # A non-success response tells Pub/Sub that this notification was not handled.
-        raise HTTPException(status_code=503, detail="Could not process Gmail notification.") from exc
-    return Response(status_code=204)
 
 
 @app.post("/api/internal/process-recent-emails")

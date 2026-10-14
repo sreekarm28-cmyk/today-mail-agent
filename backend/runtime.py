@@ -8,13 +8,10 @@ from time import perf_counter
 from .email_tool import (
     apply_user_label,
     ensure_user_labels,
-    fetch_inbox_changes,
     fetch_recent_emails,
     fetch_recent_email_summaries,
     fetch_today_emails,
-    gmail_history_cursor,
     list_user_labels,
-    save_gmail_history_cursor,
 )
 from .llm import chat
 from .observability import flush_client, get_langfuse_client, observation, record_metadata
@@ -308,31 +305,6 @@ def classify_recent_emails(
         raise
     finally:
         flush_client(client)
-
-
-def process_gmail_notification(notification_history_id: str) -> dict[str, int | str]:
-    """Fetch and classify inbox messages added since the saved Gmail history cursor."""
-    cursor = gmail_history_cursor()
-    if not cursor:
-        raise RuntimeError(
-            "Gmail notifications are not initialized. Refresh the dashboard after configuring the Pub/Sub topic."
-        )
-    try:
-        if int(notification_history_id) <= int(cursor):
-            return {"fetched": 0, "classified": 0, "failed": 0, "status": "duplicate"}
-    except ValueError as exc:
-        raise RuntimeError("Gmail sent an invalid history ID.") from exc
-
-    emails, latest_history_id = fetch_inbox_changes(cursor)
-    classification = classify_recent_emails(emails)
-    # Successfully applied labels make redelivered notifications idempotent.
-    save_gmail_history_cursor(latest_history_id)
-    return {
-        "fetched": len(emails),
-        "classified": int(classification["classified"]),
-        "failed": int(classification["failed"]),
-        "status": "processed",
-    }
 
 
 def process_scheduled_emails() -> dict[str, int | str]:

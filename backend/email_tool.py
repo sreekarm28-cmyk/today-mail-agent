@@ -20,8 +20,6 @@ APP_DATA_DIR = Path(os.getenv("LOCALAPPDATA", Path.home() / "AppData" / "Local")
 OAUTH_CLIENT_FILE = APP_DATA_DIR / "credentials.json"
 _CREDENTIAL_SERVICE = "today-mail-agent"
 _TOKEN_KEY_NAME = "GOOGLE_OAUTH_TOKEN"
-_GMAIL_HISTORY_KEY = "GMAIL_HISTORY_ID"
-_GMAIL_WATCH_EXPIRATION_KEY = "GMAIL_WATCH_EXPIRATION_MS"
 
 
 class _HTMLText(HTMLParser):
@@ -287,90 +285,6 @@ def fetch_recent_email_summaries(user_id: str | None = None) -> list[dict[str, s
             "label_ids": message.get("labelIds", []),
         })
     return results
-
-
-def start_gmail_watch() -> dict[str, str]:
-    """Start or renew Gmail push notifications for Inbox changes."""
-    topic_name = os.getenv("GMAIL_PUBSUB_TOPIC", "").strip()
-    if not topic_name:
-        raise RuntimeError("Set GMAIL_PUBSUB_TOPIC before enabling Gmail notifications.")
-
-    service = _gmail_service()
-    response = service.users().watch(
-        userId="me",
-        body={
-            "topicName": topic_name,
-            "labelIds": ["INBOX"],
-            "labelFilterBehavior": "INCLUDE",
-        },
-    ).execute()
-    history_id = str(response["historyId"])
-
-    # On renewals, preserve the processing cursor so any notifications not yet
-    # handled remain available through Gmail's history API.
-    if not keyring.get_password(_CREDENTIAL_SERVICE, _GMAIL_HISTORY_KEY):
-        keyring.set_password(_CREDENTIAL_SERVICE, _GMAIL_HISTORY_KEY, history_id)
-    if response.get("expiration"):
-        keyring.set_password(
-            _CREDENTIAL_SERVICE,
-            _GMAIL_WATCH_EXPIRATION_KEY,
-            str(response["expiration"]),
-        )
-    return {"history_id": history_id, "expiration_ms": str(response.get("expiration", ""))}
-
-
-def ensure_gmail_watch() -> None:
-    """Start a configured Gmail watch, or renew it when it is close to expiring."""
-    if not os.getenv("GMAIL_PUBSUB_TOPIC", "").strip():
-        return
-    expiration = keyring.get_password(_CREDENTIAL_SERVICE, _GMAIL_WATCH_EXPIRATION_KEY)
-    renew_before_ms = int(datetime.now(timezone.utc).timestamp() * 1000) + 24 * 60 * 60 * 1000
-    if not expiration or int(expiration) <= renew_before_ms:
-        start_gmail_watch()
-
-
-def gmail_history_cursor() -> str | None:
-    """Return the last Gmail history position handled by the push receiver."""
-    return keyring.get_password(_CREDENTIAL_SERVICE, _GMAIL_HISTORY_KEY)
-
-
-def fetch_inbox_changes(start_history_id: str) -> tuple[list[dict[str, str]], str]:
-    """Fetch inbox messages added since a saved Gmail history position."""
-    service = _gmail_service()
-    message_ids: set[str] = set()
-    page_token = None
-    latest_history_id = start_history_id
-
-    while True:
-        request_args = {
-            "userId": "me",
-            "startHistoryId": start_history_id,
-            "labelId": "INBOX",
-            "historyTypes": ["messageAdded"],
-            "maxResults": 500,
-        }
-        if page_token:
-            request_args["pageToken"] = page_token
-        result = service.users().history().list(**request_args).execute()
-        latest_history_id = str(result.get("historyId", latest_history_id))
-        for history in result.get("history", []):
-            for event in history.get("messagesAdded", []):
-                message = event.get("message", {})
-                if "INBOX" in message.get("labelIds", []):
-                    message_id = message.get("id")
-                    if message_id:
-                        message_ids.add(message_id)
-        page_token = result.get("nextPageToken")
-        if not page_token:
-            break
-
-    emails = [fetch_email_by_id(message_id) for message_id in message_ids]
-    return emails, latest_history_id
-
-
-def save_gmail_history_cursor(history_id: str) -> None:
-    """Save the last successfully handled Gmail history position in Credential Manager."""
-    keyring.set_password(_CREDENTIAL_SERVICE, _GMAIL_HISTORY_KEY, str(history_id))
 
 
 def fetch_email_by_id(message_id: str, max_body_chars: int | None = 6000, user_id: str | None = None) -> dict[str, str]:

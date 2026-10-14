@@ -17,7 +17,7 @@ from .email_tool import (
     save_gmail_history_cursor,
 )
 from .llm import chat
-from .observability import get_langfuse_client, observation, record_metadata
+from .observability import flush_client, get_langfuse_client, observation, record_metadata
 from .user_tokens import (
     delete_expired_email_cache,
     list_gmail_connections,
@@ -134,12 +134,7 @@ def run_agent(
                 )
                 raise
     finally:
-        if client is not None:
-            try:
-                client.flush()
-            except Exception:
-                # Tracing failures must never stop the email agent from responding.
-                pass
+        flush_client(client)
 
 
 def summarize_one_email(email: dict[str, str]) -> str:
@@ -177,11 +172,7 @@ def summarize_one_email(email: dict[str, str]) -> str:
                 record_metadata(span, status="error", error_type=type(exc).__name__)
                 raise
     finally:
-        if client is not None:
-            try:
-                client.flush()
-            except Exception:
-                pass
+        flush_client(client)
 
 
 def classify_recent_emails(
@@ -316,11 +307,7 @@ def classify_recent_emails(
             record_metadata(span, status="error", error_type=type(exc).__name__)
         raise
     finally:
-        if client is not None:
-            try:
-                client.flush()
-            except Exception:
-                pass
+        flush_client(client)
 
 
 def process_gmail_notification(notification_history_id: str) -> dict[str, int | str]:

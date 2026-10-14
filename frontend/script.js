@@ -74,7 +74,9 @@ async function initAppAuth() {
         connectButton.classList.remove("connected");
         connectButton.disabled = false;
         document.querySelector("#empty-connect").disabled = false;
-        void updateGmailStatus();
+        // Start cache and Gmail status requests together. The saved inbox can
+        // render while the slower Gmail status/sync request is still running.
+        void startDashboard(nextUserId);
       } else {
         gmailStatus.textContent = "Connect Gmail to get started";
         connectionNote.textContent = "Gmail not connected";
@@ -144,14 +146,11 @@ async function updateGmailStatus() {
       gmailConnected = true;
       setConnected(payload.email);
       document.querySelector("#empty-connect").hidden = true;
-      const userId = currentSession?.user?.id || "local-user";
-      if (dashboardLoadedUserId !== userId) void startDashboard(userId);
       if (new URLSearchParams(window.location.search).get("gmail") === "connected") {
         window.history.replaceState({}, "", window.location.pathname);
       }
     } else {
       gmailConnected = false;
-      dashboardLoadedUserId = null;
       gmailStatus.textContent = "Gmail is not connected";
       connectionNote.textContent = "Gmail not connected";
       connectButton.textContent = "Connect Gmail ↗";
@@ -253,16 +252,17 @@ async function startDashboard(userId) {
   emptyState.hidden = true;
   syncStatus.hidden = false;
   syncStatus.textContent = "Loading saved emails…";
-  try {
-    await loadCachedEmails();
-    syncStatus.textContent = emails.length
-      ? "Showing saved emails · Checking for updates…"
-      : "Checking Gmail for recent emails…";
-  } catch {
+  const cacheLoad = loadCachedEmails().catch(() => {
     // Continue to Gmail even if the cache is temporarily unavailable.
     emails = [];
-  }
-  await syncEmails();
+  });
+  const gmailStatusCheck = updateGmailStatus();
+  await Promise.all([cacheLoad, gmailStatusCheck]);
+  syncStatus.textContent = emails.length
+    ? "Showing saved emails · Checking for updates…"
+    : "Checking Gmail for recent emails…";
+  if (gmailConnected) await syncEmails();
+  else loadingState.hidden = true;
   if (!autoSyncTimer) {
     autoSyncTimer = window.setInterval(() => {
       if (document.visibilityState === "visible") void syncEmails();
@@ -357,6 +357,7 @@ function initials(value) {
 function renderEmail(email) {
   const card = document.createElement("article");
   card.className = "email-card";
+  card.dataset.emailId = email.id;
   const avatar = document.createElement("div");
   avatar.className = "sender-avatar";
   avatar.textContent = initials(email.from);
@@ -408,6 +409,9 @@ function renderEmail(email) {
   footer.append(labels, summarize);
   content.append(openButton, footer);
   card.append(avatar, content);
+  card.dataset.renderKey = JSON.stringify([
+    email.from, email.subject, email.received, email.preview, email.labels,
+  ]);
   return card;
 }
 
@@ -424,7 +428,20 @@ function renderDashboard() {
   const shown = activeFilter === "All mail"
     ? emails
     : emails.filter((email) => matchingCategory(email) === activeFilter);
-  emailList.replaceChildren(...shown.map(renderEmail));
+  const existingCards = new Map(
+    [...emailList.children].map((card) => [card.dataset.emailId, card]),
+  );
+  const nextCards = shown.map((email) => {
+    const renderKey = JSON.stringify([
+      email.from, email.subject, email.received, email.preview, email.labels,
+    ]);
+    const existing = existingCards.get(email.id);
+    if (existing?.dataset.renderKey === renderKey) return existing;
+    const card = renderEmail(email);
+    card.dataset.renderKey = renderKey;
+    return card;
+  });
+  emailList.replaceChildren(...nextCards);
   emailList.hidden = shown.length === 0;
   emptyState.hidden = shown.length > 0;
   if (emails.length && !shown.length) {

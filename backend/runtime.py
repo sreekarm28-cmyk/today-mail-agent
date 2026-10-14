@@ -155,7 +155,7 @@ def summarize_one_email(email: dict[str, str]) -> str:
                         {"role": "user", "content": prompt},
                     ],
                     [],
-                    max_tokens=300,
+                    max_tokens=600,
                     include_diagnostics=True,
                 )
                 content = message.get("content")

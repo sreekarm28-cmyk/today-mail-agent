@@ -163,10 +163,14 @@ def summarize_one_email(email: dict[str, str]) -> str:
                         {"role": "user", "content": prompt},
                     ],
                     [],
+                    max_tokens=300,
                 )
-                answer = message.get("content", "").strip()
+                content = message.get("content")
+                answer = content.strip() if isinstance(content, str) else ""
                 if not answer:
-                    raise RuntimeError("The model returned an empty summary.")
+                    raise RuntimeError(
+                        "The model returned no summary text. Try again, or choose a different model."
+                    )
                 record_metadata(span, status="success")
                 return answer
             except Exception as exc:

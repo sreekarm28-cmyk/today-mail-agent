@@ -17,7 +17,7 @@ OPENROUTER_MODEL = os.getenv(
 )
 
 
-def chat(messages: list[dict], tools: list[dict], *, tool_choice="auto") -> dict:
+def chat(messages: list[dict], tools: list[dict], *, tool_choice="auto", max_tokens=1024) -> dict:
     """Send one non-streaming request and return the assistant message."""
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
@@ -30,7 +30,7 @@ def chat(messages: list[dict], tools: list[dict], *, tool_choice="auto") -> dict
         "model": OPENROUTER_MODEL,
         "messages": messages,
         "temperature": 0.2,
-        "max_tokens": 1024,
+        "max_tokens": max_tokens,
         "stream": False,
     }
     if tools:

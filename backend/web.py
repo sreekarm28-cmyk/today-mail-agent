@@ -5,6 +5,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import sys
 from datetime import datetime, timedelta, timezone
 from time import perf_counter
 from uuid import uuid4
@@ -44,6 +45,11 @@ from .user_tokens import (
 
 APP_DIR = Path(__file__).resolve().parent
 FRONTEND_DIR = APP_DIR.parent / "frontend"
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    stream=sys.stdout,
+)
 logger = logging.getLogger(__name__)
 MODEL_REQUESTS_PER_MINUTE = 2
 MODEL_REQUESTS_PER_DAY = 10

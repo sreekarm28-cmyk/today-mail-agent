@@ -7,7 +7,8 @@ import os
 from pathlib import Path
 import sys
 from datetime import datetime, timedelta, timezone
-from time import perf_counter
+from threading import Lock
+from time import monotonic, perf_counter
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
@@ -53,7 +54,19 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 MODEL_REQUESTS_PER_MINUTE = 2
 MODEL_REQUESTS_PER_DAY = 10
+DASHBOARD_SYNC_FRESH_SECONDS = 30
+_dashboard_sync_locks: dict[str, Lock] = {}
+_dashboard_sync_locks_guard = Lock()
+_dashboard_sync_last_success: dict[str, float] = {}
 app = FastAPI(title="Today Mail", docs_url=None, redoc_url=None)
+
+
+def _dashboard_sync_lock(user_id: str | None) -> tuple[str, Lock]:
+    """Return a process-local lock shared by dashboard syncs for this user."""
+    key = user_id or "local"
+    with _dashboard_sync_locks_guard:
+        lock = _dashboard_sync_locks.setdefault(key, Lock())
+    return key, lock
 
 
 def _rate_limit_key(request: Request) -> str:
@@ -404,26 +417,57 @@ def _to_dashboard_items(emails: list[dict], user_id: str | None) -> list[dict]:
 def sync_dashboard_emails(user: dict | None = Depends(_require_app_user)) -> dict:
     """Fetch lightweight Gmail metadata, update the per-user Supabase cache, and return it."""
     started = perf_counter()
+    user_id = user["id"] if user else None
+    lock_key, sync_lock = _dashboard_sync_lock(user_id)
     try:
-        user_id = user["id"] if user else None
-        fetch_started = perf_counter()
-        emails = fetch_recent_email_summaries(user_id)
-        log_timing("dashboard.gmail_fetch", fetch_started, email_count=len(emails))
-        transform_started = perf_counter()
-        dashboard_items = _to_dashboard_items(emails, user_id)
-        log_timing("dashboard.prepare_list", transform_started, email_count=len(dashboard_items))
-        if user_id:
-            cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-            cache_started = perf_counter()
-            delete_expired_email_cache(cutoff, user_id)
-            replace_recent_email_cache(user_id, dashboard_items)
-            log_timing("dashboard.cache_write", cache_started, email_count=len(dashboard_items))
-        log_timing("dashboard.sync", started, email_count=len(dashboard_items))
-        return {
-            "emails": dashboard_items,
-            "categories": CATEGORIES,
-            "sync_status": "updated",
-        }
+        lock_wait_started = perf_counter()
+        with sync_lock:
+            log_timing("dashboard.sync_lock_wait", lock_wait_started, user_scoped=bool(user_id))
+            now = monotonic()
+            last_success = _dashboard_sync_last_success.get(lock_key)
+            if user_id and last_success is not None:
+                freshness_age = now - last_success
+                if freshness_age < DASHBOARD_SYNC_FRESH_SECONDS:
+                    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+                    cache_started = perf_counter()
+                    try:
+                        cached_items = get_recent_email_cache(user_id, cutoff)
+                    except Exception:
+                        # A cache read failure should not prevent a fresh Gmail sync.
+                        logger.warning("Could not reuse the fresh dashboard cache; syncing Gmail.")
+                    else:
+                        log_timing(
+                            "dashboard.sync_reused_cache",
+                            cache_started,
+                            email_count=len(cached_items),
+                            age_ms=round(freshness_age * 1000),
+                        )
+                        log_timing("dashboard.sync", started, email_count=len(cached_items), reused=True)
+                        return {
+                            "emails": cached_items,
+                            "categories": CATEGORIES,
+                            "sync_status": "reused",
+                        }
+
+            fetch_started = perf_counter()
+            emails = fetch_recent_email_summaries(user_id)
+            log_timing("dashboard.gmail_fetch", fetch_started, email_count=len(emails))
+            transform_started = perf_counter()
+            dashboard_items = _to_dashboard_items(emails, user_id)
+            log_timing("dashboard.prepare_list", transform_started, email_count=len(dashboard_items))
+            if user_id:
+                cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+                cache_started = perf_counter()
+                delete_expired_email_cache(cutoff, user_id)
+                replace_recent_email_cache(user_id, dashboard_items)
+                log_timing("dashboard.cache_write", cache_started, email_count=len(dashboard_items))
+                _dashboard_sync_last_success[lock_key] = monotonic()
+            log_timing("dashboard.sync", started, email_count=len(dashboard_items), reused=False)
+            return {
+                "emails": dashboard_items,
+                "categories": CATEGORIES,
+                "sync_status": "updated",
+            }
     except Exception as exc:
         log_timing("dashboard.sync", started, status="error")
         logger.exception("Could not sync dashboard emails")

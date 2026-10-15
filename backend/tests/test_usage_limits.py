@@ -76,6 +76,7 @@ def test_summary_endpoint_allows_two_requests_then_returns_429(monkeypatch):
             ]
         assert [response.status_code for response in results] == [200, 200, 429]
         assert results[0].json() == {"summary": "A short test summary."}
+        assert results[0].headers.get("x-request-id")
     finally:
         web.app.dependency_overrides.pop(web._require_app_user, None)
         web.limiter.reset()

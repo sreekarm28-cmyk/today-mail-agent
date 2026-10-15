@@ -6,6 +6,8 @@ import logging
 import os
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
+from time import perf_counter
+from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, RedirectResponse, Response
@@ -14,6 +16,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from .main import load_local_settings
+from .diagnostics import log_timing, reset_request_id, set_request_id
 
 load_local_settings()
 
@@ -63,15 +66,34 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 @app.middleware("http")
 async def redact_oauth_callback_query_from_access_logs(request: Request, call_next):
-    """Keep one-time Google authorization codes out of Uvicorn access logs."""
+    """Assign a request ID, log total time, and hide one-time OAuth codes."""
     is_oauth_callback = request.url.path == "/api/connect-gmail/callback"
+    request_id = uuid4().hex[:12]
+    request.state.request_id = request_id
+    request_token = set_request_id(request_id)
+    started = perf_counter()
+    status_code = 500
     try:
-        return await call_next(request)
+        response = await call_next(request)
+        status_code = response.status_code
+        response.headers["X-Request-ID"] = request_id
+        return response
     finally:
+        route = request.scope.get("route")
+        route_path = getattr(route, "path", request.url.path)
+        log_timing(
+            "http.request",
+            started,
+            status="success" if status_code < 400 else "error",
+            method=request.method,
+            route=route_path,
+            status_code=status_code,
+        )
         if is_oauth_callback:
             # FastAPI has already read the query parameters. Uvicorn logs the
             # request scope after this middleware returns, so clear the query.
             request.scope["query_string"] = b""
+        reset_request_id(request_token)
 
 
 def _safe_oauth_error_details(exc: Exception) -> str:
@@ -331,6 +353,7 @@ def gmail_status(user: dict | None = Depends(_require_app_user)) -> dict[str, st
 @app.get("/api/dashboard/emails")
 def dashboard_emails(user: dict | None = Depends(_require_app_user)) -> dict:
     """Return this user's saved recent-email list without waiting on Gmail or the model."""
+    started = perf_counter()
     try:
         user_id = user["id"] if user else None
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
@@ -339,12 +362,14 @@ def dashboard_emails(user: dict | None = Depends(_require_app_user)) -> dict:
             dashboard_items = get_recent_email_cache(user_id, cutoff)
         else:
             dashboard_items = []
+        log_timing("dashboard.cache_read", started, email_count=len(dashboard_items))
         return {
             "emails": dashboard_items,
             "categories": CATEGORIES,
             "sync_status": "cached" if user_id else "live",
         }
     except Exception as exc:
+        log_timing("dashboard.cache_read", started, status="error")
         logger.exception("Could not load cached dashboard emails")
         raise HTTPException(status_code=400, detail="Something went wrong. Please try again.") from exc
 
@@ -372,20 +397,29 @@ def _to_dashboard_items(emails: list[dict], user_id: str | None) -> list[dict]:
 @app.post("/api/dashboard/sync")
 def sync_dashboard_emails(user: dict | None = Depends(_require_app_user)) -> dict:
     """Fetch lightweight Gmail metadata, update the per-user Supabase cache, and return it."""
+    started = perf_counter()
     try:
         user_id = user["id"] if user else None
+        fetch_started = perf_counter()
         emails = fetch_recent_email_summaries(user_id)
+        log_timing("dashboard.gmail_fetch", fetch_started, email_count=len(emails))
+        transform_started = perf_counter()
         dashboard_items = _to_dashboard_items(emails, user_id)
+        log_timing("dashboard.prepare_list", transform_started, email_count=len(dashboard_items))
         if user_id:
             cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+            cache_started = perf_counter()
             delete_expired_email_cache(cutoff, user_id)
             replace_recent_email_cache(user_id, dashboard_items)
+            log_timing("dashboard.cache_write", cache_started, email_count=len(dashboard_items))
+        log_timing("dashboard.sync", started, email_count=len(dashboard_items))
         return {
             "emails": dashboard_items,
             "categories": CATEGORIES,
             "sync_status": "updated",
         }
     except Exception as exc:
+        log_timing("dashboard.sync", started, status="error")
         logger.exception("Could not sync dashboard emails")
         raise HTTPException(status_code=400, detail="Something went wrong. Please try again.") from exc
 
@@ -428,10 +462,18 @@ def summarize_dashboard_email(
     user: dict | None = Depends(_require_app_user),
 ) -> dict[str, str]:
     """Fetch and summarize only the email selected in the dashboard."""
+    started = perf_counter()
     try:
+        fetch_started = perf_counter()
         email = fetch_email_by_id(message_id, user_id=user["id"] if user else None)
-        return {"summary": summarize_one_email(email)}
+        log_timing("summary.gmail_fetch", fetch_started)
+        model_started = perf_counter()
+        summary = summarize_one_email(email)
+        log_timing("summary.model", model_started)
+        log_timing("summary.total", started)
+        return {"summary": summary}
     except Exception as exc:
+        log_timing("summary.total", started, status="error")
         logger.exception("Could not summarize dashboard email")
         raise HTTPException(status_code=400, detail="Something went wrong. Please try again.") from exc
 

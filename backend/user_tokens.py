@@ -2,11 +2,14 @@
 
 import json
 import os
+from time import perf_counter
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from cryptography.fernet import Fernet, InvalidToken
+
+from .diagnostics import log_timing
 
 
 def _settings() -> tuple[str, str]:
@@ -43,11 +46,28 @@ def _request(method: str, path: str, payload: dict | list | None = None, prefer:
     if prefer:
         headers["Prefer"] = prefer
     request = Request(f"{project_url}/rest/v1/{path}", data=body, headers=headers, method=method)
+    started = perf_counter()
     try:
         with urlopen(request, timeout=15) as response:
             raw = response.read()
-            return json.loads(raw.decode("utf-8")) if raw else None
+            result = json.loads(raw.decode("utf-8")) if raw else None
+        log_timing(
+            "supabase.request",
+            started,
+            method=method,
+            resource=path.split("?", 1)[0],
+            row_count=len(result) if isinstance(result, list) else (1 if result else 0),
+        )
+        return result
     except (HTTPError, URLError, ValueError) as exc:
+        log_timing(
+            "supabase.request",
+            started,
+            status="error",
+            method=method,
+            resource=path.split("?", 1)[0],
+            error_type=type(exc).__name__,
+        )
         raise RuntimeError("Could not safely access Supabase data.") from exc
 
 
@@ -75,10 +95,13 @@ def get_gmail_connection(user_id: str) -> dict | None:
     if not rows:
         return None
     row = rows[0]
+    decrypt_started = perf_counter()
     try:
         refresh_token = _fernet().decrypt(row["refresh_token_ciphertext"].encode("ascii")).decode("utf-8")
     except (InvalidToken, KeyError, UnicodeEncodeError) as exc:
+        log_timing("gmail.refresh_token_decrypt", decrypt_started, status="error")
         raise RuntimeError("The saved Gmail connection could not be unlocked. Contact the app owner.") from exc
+    log_timing("gmail.refresh_token_decrypt", decrypt_started)
     return {"email": row["gmail_email"], "refresh_token": refresh_token}
 
 

@@ -10,9 +10,12 @@ import json
 import os
 from pathlib import Path
 import re
+from time import perf_counter
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import keyring
+
+from .diagnostics import log_timing
 
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
@@ -116,7 +119,9 @@ def _credentials(user_id: str | None = None):
             client_secret=client_secret,
             scopes=SCOPES,
         )
+        refresh_started = perf_counter()
         credentials.refresh(Request())
+        log_timing("gmail.oauth_refresh", refresh_started)
         return credentials
 
     APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -190,13 +195,19 @@ def _fetch_emails_in_range(start: datetime, end: datetime, user_id: str | None =
     # Search broadly, then filter using Gmail's exact received timestamp.
     search_start = (start.astimezone(timezone.utc).date() - timedelta(days=1)).strftime("%Y/%m/%d")
     limit = max(1, min(int(os.getenv("EMAIL_MAX_RESULTS", "50")), 500))
+    service_started = perf_counter()
     service = _gmail_service(user_id)
+    log_timing("gmail.client_ready", service_started)
+    list_started = perf_counter()
     response = service.users().messages().list(
         userId="me", q=f"in:inbox after:{search_start}", maxResults=limit
     ).execute()
+    message_ids = response.get("messages", [])
+    log_timing("gmail.message_list", list_started, candidate_count=len(message_ids))
 
     results = []
-    for item in response.get("messages", []):
+    content_started = perf_counter()
+    for item in message_ids:
         raw_message = service.users().messages().get(
             userId="me", id=item["id"], format="raw"
         ).execute()
@@ -229,6 +240,12 @@ def _fetch_emails_in_range(start: datetime, end: datetime, user_id: str | None =
             "label_ids": raw_message.get("labelIds", []),
         })
 
+    log_timing(
+        "gmail.message_content",
+        content_started,
+        requested_count=len(message_ids),
+        returned_count=len(results),
+    )
     return results
 
 
@@ -245,13 +262,19 @@ def fetch_recent_email_summaries(user_id: str | None = None) -> list[dict[str, s
     start = now - timedelta(hours=24)
     search_start = (start.astimezone(timezone.utc).date() - timedelta(days=1)).strftime("%Y/%m/%d")
     limit = max(1, min(int(os.getenv("EMAIL_MAX_RESULTS", "50")), 500))
+    service_started = perf_counter()
     service = _gmail_service(user_id)
+    log_timing("gmail.client_ready", service_started)
+    list_started = perf_counter()
     response = service.users().messages().list(
         userId="me", q=f"in:inbox after:{search_start}", maxResults=limit
     ).execute()
+    message_ids = response.get("messages", [])
+    log_timing("gmail.message_list", list_started, candidate_count=len(message_ids))
 
     results: list[dict[str, str | list[str]]] = []
-    for item in response.get("messages", []):
+    metadata_started = perf_counter()
+    for item in message_ids:
         message = service.users().messages().get(
             userId="me",
             id=item["id"],
@@ -276,12 +299,19 @@ def fetch_recent_email_summaries(user_id: str | None = None) -> list[dict[str, s
             "preview": message.get("snippet", ""),
             "label_ids": message.get("labelIds", []),
         })
+    log_timing(
+        "gmail.message_metadata",
+        metadata_started,
+        requested_count=len(message_ids),
+        returned_count=len(results),
+    )
     return results
 
 
 def fetch_email_by_id(message_id: str, max_body_chars: int | None = 6000, user_id: str | None = None) -> dict[str, str]:
     """Fetch one Gmail message by ID, optionally limiting its body for model use."""
     local_zone = _local_timezone()
+    fetch_started = perf_counter()
     message_data = _gmail_service(user_id).users().messages().get(
         userId="me", id=message_id, format="raw"
     ).execute()
@@ -297,6 +327,7 @@ def fetch_email_by_id(message_id: str, max_body_chars: int | None = 6000, user_i
     body = _body(message)
     if max_body_chars is not None:
         body = body[:max_body_chars]
+    log_timing("gmail.selected_email_content", fetch_started, body_char_count=len(body))
     return {
         "id": message_id,
         "from": _decode(message.get("From")),
@@ -311,16 +342,20 @@ def fetch_email_by_id(message_id: str, max_body_chars: int | None = 6000, user_i
 
 def list_user_labels(user_id: str | None = None) -> list[dict[str, str]]:
     """Return labels the user created, excluding Gmail's system labels."""
+    started = perf_counter()
     labels = _gmail_service(user_id).users().labels().list(userId="me").execute().get("labels", [])
-    return [
+    result = [
         {"id": label["id"], "name": label["name"]}
         for label in labels
         if label.get("type") == "user" and label.get("id") and label.get("name")
     ]
+    log_timing("gmail.labels_list", started, label_count=len(result))
+    return result
 
 
 def ensure_user_labels(label_names: list[str], user_id: str | None = None) -> list[dict[str, str]]:
     """Return existing labels and create any requested custom labels that are missing."""
+    started = perf_counter()
     service = _gmail_service(user_id)
     labels = service.users().labels().list(userId="me").execute().get("labels", [])
     by_name = {
@@ -329,6 +364,7 @@ def ensure_user_labels(label_names: list[str], user_id: str | None = None) -> li
         if label.get("type") == "user" and label.get("id") and label.get("name")
     }
 
+    created_count = 0
     for name in label_names:
         if name in by_name:
             continue
@@ -336,15 +372,28 @@ def ensure_user_labels(label_names: list[str], user_id: str | None = None) -> li
             userId="me", body={"name": name}
         ).execute()
         by_name[name] = {"id": created["id"], "name": created["name"]}
+        created_count += 1
 
+    log_timing(
+        "gmail.labels_ensure",
+        started,
+        label_count=len(label_names),
+        created_count=created_count,
+    )
     return list(by_name.values())
 
 
 def apply_user_label(message_id: str, label_id: str, label_name: str, user_id: str | None = None) -> str:
     """Apply a previously verified existing user label to one Gmail message."""
-    _gmail_service(user_id).users().messages().modify(
-        userId="me",
-        id=message_id,
-        body={"addLabelIds": [label_id]},
-    ).execute()
+    started = perf_counter()
+    try:
+        _gmail_service(user_id).users().messages().modify(
+            userId="me",
+            id=message_id,
+            body={"addLabelIds": [label_id]},
+        ).execute()
+    except Exception:
+        log_timing("gmail.apply_label", started, status="error", category=label_name)
+        raise
+    log_timing("gmail.apply_label", started, category=label_name)
     return f"Applied the '{label_name}' label."

@@ -10,6 +10,7 @@ A small Gmail dashboard that shows messages from the last 24 hours, classifies t
 - **OpenRouter:** sends classification and summary requests to the configured model.
 - **GitHub Actions:** calls Render about every 30 minutes to classify new messages and refresh the cache, even when nobody has the dashboard open.
 - **Langfuse:** optional model-call tracing.
+- **Backend timing logs:** `APP_TIMING` entries show request-correlated durations for Gmail, Supabase, and model steps in the service logs.
 
 ## Run locally
 
@@ -57,6 +58,7 @@ Run both SQL files in `supabase/migrations/` using the Supabase SQL Editor. Add 
 
 - Gmail access is granted through Google OAuth; the app never asks for a Gmail password.
 - The dashboard cache stores sender, subject, received time, preview, and labels for 24 hours. It does not store full email bodies.
+- Timing logs include request IDs, step names, durations, and counts; they do not include email text, email addresses, or tokens.
 - Langfuse is optional. Traces include model timings and token counts, not email bodies or summary text.
 - Google may require OAuth verification and a security assessment before a public release that uses Gmail's restricted `gmail.modify` scope.
 - This app does not send or reply to emails.

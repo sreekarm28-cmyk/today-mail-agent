@@ -7,6 +7,7 @@ from time import perf_counter
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from .diagnostics import current_request_id, log_timing
 from .observability import get_langfuse_client, observation, record_metadata
 
 
@@ -105,6 +106,7 @@ def chat(
             metadata = {
                 "status": "success",
                 "duration_ms": round((perf_counter() - started) * 1000),
+                "request_id": current_request_id(),
                 "tool_count": len(tools),
                 "tool_call_count": len(message.get("tool_calls") or []),
                 "finish_reason": diagnostics["finish_reason"],
@@ -118,14 +120,30 @@ def chat(
             if usage.get("cost") is not None:
                 metadata["cost_usd"] = usage["cost"]
             record_metadata(span, **metadata)
+            log_timing(
+                "openrouter.chat",
+                started,
+                model=OPENROUTER_MODEL,
+                input_tokens=diagnostics["input_tokens"],
+                output_tokens=diagnostics["output_tokens"],
+                tool_call_count=metadata["tool_call_count"],
+            )
             if include_diagnostics:
                 return message, diagnostics
             return message
         except Exception as exc:
+            log_timing(
+                "openrouter.chat",
+                started,
+                status="error",
+                model=OPENROUTER_MODEL,
+                error_type=type(exc).__name__,
+            )
             record_metadata(
                 span,
                 status="error",
                 error_type=type(exc).__name__,
                 duration_ms=round((perf_counter() - started) * 1000),
+                request_id=current_request_id(),
             )
             raise

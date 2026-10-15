@@ -3,6 +3,7 @@
 import json
 import logging
 from datetime import datetime, timedelta, timezone
+from time import perf_counter
 
 from .email_tool import (
     apply_user_label,
@@ -11,6 +12,7 @@ from .email_tool import (
     fetch_recent_email_summaries,
     list_user_labels,
 )
+from .diagnostics import log_timing
 from .llm import chat
 from .observability import flush_client, get_langfuse_client, observation, record_metadata
 from .user_tokens import (
@@ -93,6 +95,7 @@ def classify_batch(
     if not emails:
         return {}
 
+    model_started = perf_counter()
     message = chat(
         [
             {"role": "system", "content": CLASSIFICATION_PROMPTS[prompt_version]},
@@ -122,6 +125,8 @@ def classify_batch(
             "function": {"name": "return_email_categories"},
         },
     )
+    log_timing("classification.model_batch", model_started, email_count=len(emails))
+    validation_started = perf_counter()
     calls = message.get("tool_calls") or []
     if len(calls) != 1 or (calls[0].get("function") or {}).get("name") != "return_email_categories":
         raise RuntimeError("The model did not return category assignments.")
@@ -147,6 +152,7 @@ def classify_batch(
         categories_by_id[email_id] = category
     if set(categories_by_id) != expected_ids:
         raise ValueError("The model did not return one category for every email.")
+    log_timing("classification.validate_batch", validation_started, email_count=len(emails))
     return categories_by_id
 
 
@@ -198,12 +204,14 @@ def classify_recent_emails(
     emails: list[dict] | None = None,
     user_id: str | None = None,
 ) -> dict[str, int | str]:
-    """Classify uncategorized recent emails and apply labels through a model tool call."""
+    """Classify uncategorized emails with the model, then apply Gmail labels in Python."""
     client = get_langfuse_client()
     try:
         with observation(client, as_type="span", name="classify-recent-emails") as span:
             # Create only missing category labels before classifying. Existing labels stay as-is.
+            labels_started = perf_counter()
             labels = ensure_user_labels(CLASSIFICATION_CATEGORIES, user_id)
+            log_timing("classification.labels_ready", labels_started, label_count=len(labels))
             label_ids = {label["name"]: label["id"] for label in labels}
 
             if emails is None:
@@ -230,6 +238,9 @@ def classify_recent_emails(
                     if set(assignment_by_id) != expected_ids:
                         raise ValueError("The model did not return one category for every email.")
 
+                    apply_started = perf_counter()
+                    batch_classified = 0
+                    batch_failed = 0
                     for email_id, category in assignment_by_id.items():
                         try:
                             apply_user_label(email_id, label_ids[category], category, user_id)
@@ -237,10 +248,19 @@ def classify_recent_emails(
                             if label_ids[category] not in email_labels:
                                 email_labels.append(label_ids[category])
                             classified += 1
+                            batch_classified += 1
                         except Exception as exc:
                             failed += 1
+                            batch_failed += 1
                             if not first_error:
                                 first_error = str(exc)
+                    log_timing(
+                        "classification.apply_batch_labels",
+                        apply_started,
+                        email_count=len(batch),
+                        classified_count=batch_classified,
+                        failed_count=batch_failed,
+                    )
                 except Exception as exc:
                     failed += len(batch)
                     if not first_error:

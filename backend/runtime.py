@@ -10,7 +10,6 @@ from .email_tool import (
     ensure_user_labels,
     fetch_recent_emails,
     fetch_recent_email_summaries,
-    list_user_labels,
 )
 from .diagnostics import log_timing
 from .llm import chat
@@ -321,10 +320,6 @@ def process_scheduled_emails() -> dict[str, int | str]:
             result["failed_emails"] += int(classification["failed"])
             try:
                 summaries = fetch_recent_email_summaries(user_id)
-                label_names = {
-                    label["id"]: label["name"]
-                    for label in list_user_labels(user_id)
-                }
                 cache_rows = [
                     {
                         "id": email["id"],
@@ -332,11 +327,7 @@ def process_scheduled_emails() -> dict[str, int | str]:
                         "subject": email.get("subject", "(No subject)"),
                         "received": email["received"],
                         "preview": email.get("preview", ""),
-                        "labels": [
-                            label_names[label_id]
-                            for label_id in email.get("label_ids", [])
-                            if label_id in label_names
-                        ],
+                        "labels": email.get("labels", []),
                     }
                     for email in summaries
                 ]

@@ -23,6 +23,7 @@ APP_DATA_DIR = Path(os.getenv("LOCALAPPDATA", Path.home() / "AppData" / "Local")
 OAUTH_CLIENT_FILE = APP_DATA_DIR / "credentials.json"
 _CREDENTIAL_SERVICE = "today-mail-agent"
 _TOKEN_KEY_NAME = "GOOGLE_OAUTH_TOKEN"
+GMAIL_BATCH_SIZE = 100
 
 
 class _HTMLText(HTMLParser):
@@ -255,6 +256,47 @@ def fetch_recent_emails(user_id: str | None = None) -> list[dict[str, str]]:
     return _fetch_emails_in_range(now - timedelta(hours=24), now, user_id)
 
 
+def _fetch_message_metadata_in_batches(service, message_ids: list[dict]) -> dict[str, dict]:
+    """Fetch metadata for many Gmail messages using one HTTP batch per group."""
+    messages_by_id: dict[str, dict] = {}
+    errors: list[Exception] = []
+
+    for offset in range(0, len(message_ids), GMAIL_BATCH_SIZE):
+        batch_items = message_ids[offset : offset + GMAIL_BATCH_SIZE]
+        request_ids = {
+            str(index): item["id"]
+            for index, item in enumerate(batch_items)
+        }
+
+        def on_response(request_id, response, exception):
+            message_id = request_ids[request_id]
+            if exception is not None:
+                errors.append(exception)
+            else:
+                messages_by_id[message_id] = response
+
+        batch = service.new_batch_http_request()
+        for request_id, item in zip(request_ids, batch_items):
+            request = service.users().messages().get(
+                userId="me",
+                id=item["id"],
+                format="metadata",
+                metadataHeaders=["From", "Subject"],
+            )
+            batch.add(request, request_id=request_id, callback=on_response)
+        batch_started = perf_counter()
+        batch.execute()
+        log_timing(
+            "gmail.message_metadata_batch",
+            batch_started,
+            request_count=len(batch_items),
+        )
+
+    if errors:
+        raise errors[0]
+    return messages_by_id
+
+
 def fetch_recent_email_summaries(user_id: str | None = None) -> list[dict[str, str | list[str]]]:
     """Fetch lightweight inbox metadata for the dashboard, without email bodies."""
     local_zone = _local_timezone()
@@ -272,15 +314,20 @@ def fetch_recent_email_summaries(user_id: str | None = None) -> list[dict[str, s
     message_ids = response.get("messages", [])
     log_timing("gmail.message_list", list_started, candidate_count=len(message_ids))
 
+    labels_started = perf_counter()
+    gmail_labels = service.users().labels().list(userId="me").execute().get("labels", [])
+    label_names_by_id = {
+        label["id"]: label["name"]
+        for label in gmail_labels
+        if label.get("type") == "user" and label.get("id") and label.get("name")
+    }
+    log_timing("gmail.labels_list", labels_started, label_count=len(label_names_by_id))
+
     results: list[dict[str, str | list[str]]] = []
     metadata_started = perf_counter()
+    messages_by_id = _fetch_message_metadata_in_batches(service, message_ids)
     for item in message_ids:
-        message = service.users().messages().get(
-            userId="me",
-            id=item["id"],
-            format="metadata",
-            metadataHeaders=["From", "Subject"],
-        ).execute()
+        message = messages_by_id[item["id"]]
         internal_ms = message.get("internalDate")
         if not internal_ms:
             continue
@@ -298,12 +345,18 @@ def fetch_recent_email_summaries(user_id: str | None = None) -> list[dict[str, s
             "received": received.isoformat(timespec="minutes"),
             "preview": message.get("snippet", ""),
             "label_ids": message.get("labelIds", []),
+            "labels": [
+                label_names_by_id[label_id]
+                for label_id in message.get("labelIds", [])
+                if label_id in label_names_by_id
+            ],
         })
     log_timing(
         "gmail.message_metadata",
         metadata_started,
         requested_count=len(message_ids),
         returned_count=len(results),
+        batch_count=(len(message_ids) + GMAIL_BATCH_SIZE - 1) // GMAIL_BATCH_SIZE,
     )
     return results
 
@@ -338,19 +391,6 @@ def fetch_email_by_id(message_id: str, max_body_chars: int | None = 6000, user_i
         "body": body,
         "label_ids": message_data.get("labelIds", []),
     }
-
-
-def list_user_labels(user_id: str | None = None) -> list[dict[str, str]]:
-    """Return labels the user created, excluding Gmail's system labels."""
-    started = perf_counter()
-    labels = _gmail_service(user_id).users().labels().list(userId="me").execute().get("labels", [])
-    result = [
-        {"id": label["id"], "name": label["name"]}
-        for label in labels
-        if label.get("type") == "user" and label.get("id") and label.get("name")
-    ]
-    log_timing("gmail.labels_list", started, label_count=len(result))
-    return result
 
 
 def ensure_user_labels(label_names: list[str], user_id: str | None = None) -> list[dict[str, str]]:

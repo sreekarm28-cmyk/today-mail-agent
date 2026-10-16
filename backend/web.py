@@ -28,7 +28,6 @@ from .email_tool import (
     fetch_email_by_id,
     fetch_recent_email_summaries,
     gmail_account_email,
-    list_user_labels,
 )
 from .runtime import (
     CLASSIFICATION_CATEGORIES,
@@ -393,9 +392,7 @@ def dashboard_emails(user: dict | None = Depends(_require_app_user)) -> dict:
         raise HTTPException(status_code=400, detail="Something went wrong. Please try again.") from exc
 
 
-def _to_dashboard_items(emails: list[dict], user_id: str | None) -> list[dict]:
-    labels = list_user_labels(user_id)
-    label_names = {label["id"]: label["name"] for label in labels}
+def _to_dashboard_items(emails: list[dict]) -> list[dict]:
     dashboard_items = []
     for email in emails:
         dashboard_items.append({
@@ -403,11 +400,7 @@ def _to_dashboard_items(emails: list[dict], user_id: str | None) -> list[dict]:
             "from": email.get("from", ""),
             "subject": email.get("subject", "(No subject)"),
             "received": email["received"],
-            "labels": email.get("labels") or [
-                label_names[label_id]
-                for label_id in email.get("label_ids", [])
-                if label_id in label_names
-            ],
+            "labels": email.get("labels", []),
             "preview": email.get("preview") or " ".join(email.get("body", "").split())[:240],
         })
     return dashboard_items
@@ -453,7 +446,7 @@ def sync_dashboard_emails(user: dict | None = Depends(_require_app_user)) -> dic
             emails = fetch_recent_email_summaries(user_id)
             log_timing("dashboard.gmail_fetch", fetch_started, email_count=len(emails))
             transform_started = perf_counter()
-            dashboard_items = _to_dashboard_items(emails, user_id)
+            dashboard_items = _to_dashboard_items(emails)
             log_timing("dashboard.prepare_list", transform_started, email_count=len(dashboard_items))
             if user_id:
                 cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()

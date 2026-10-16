@@ -23,7 +23,7 @@ def test_recent_sync_reuses_cache_instead_of_fetching_gmail(monkeypatch):
         return emails
 
     monkeypatch.setattr(web, "fetch_recent_email_summaries", fake_fetch)
-    monkeypatch.setattr(web, "_to_dashboard_items", lambda fetched, request_user_id: fetched)
+    monkeypatch.setattr(web, "_to_dashboard_items", lambda fetched: fetched)
     monkeypatch.setattr(web, "delete_expired_email_cache", lambda cutoff, request_user_id: None)
     monkeypatch.setattr(
         web,

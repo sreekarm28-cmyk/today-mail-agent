@@ -177,7 +177,7 @@ def _initial_sync_mailbox(user_id: str, user_email: str = "") -> dict[str, int |
         return {"status": "already_complete", "email_count": 0, "classified": 0, "unlabeled": 0}
 
     try:
-        days = int(os.getenv("EMAIL_INITIAL_SYNC_DAYS", "30"))
+        days = int(os.getenv("EMAIL_INITIAL_SYNC_DAYS", "1"))
     except ValueError as exc:
         raise RuntimeError("EMAIL_INITIAL_SYNC_DAYS must be a whole number.") from exc
     if not 1 <= days <= 365:
@@ -369,7 +369,7 @@ def sync_persistent_mailbox(user_id: str, user_email: str = "") -> dict[str, int
             if last_date:
                 cutoff_ms = max(0, last_date - overlap_ms)
             else:
-                days = max(1, min(int(os.getenv("EMAIL_INITIAL_SYNC_DAYS", "30")), 365))
+                days = max(1, min(int(os.getenv("EMAIL_INITIAL_SYNC_DAYS", "1")), 365))
                 cutoff_ms = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp() * 1000)
             changes = {
                 "history_id": current_history_id,

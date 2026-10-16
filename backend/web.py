@@ -6,9 +6,7 @@ import logging
 import os
 from pathlib import Path
 import sys
-from datetime import datetime, timedelta, timezone
-from threading import Lock
-from time import monotonic, perf_counter
+from time import perf_counter
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
@@ -25,20 +23,19 @@ load_local_settings()
 from .email_tool import (
     SCOPES,
     connect_gmail_account,
-    fetch_email_by_id,
-    fetch_recent_email_summaries,
     gmail_account_email,
 )
 from .runtime import (
     CLASSIFICATION_CATEGORIES,
+    initial_sync_mailbox,
     process_scheduled_emails,
     summarize_one_email,
+    sync_persistent_mailbox,
 )
 from .user_tokens import (
-    delete_expired_email_cache,
     get_gmail_connection,
-    get_recent_email_cache,
-    replace_recent_email_cache,
+    get_persistent_email_by_id,
+    get_persistent_emails,
     save_gmail_connection,
 )
 
@@ -53,19 +50,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 MODEL_REQUESTS_PER_MINUTE = 2
 MODEL_REQUESTS_PER_DAY = 10
-DASHBOARD_SYNC_FRESH_SECONDS = 30
-_dashboard_sync_locks: dict[str, Lock] = {}
-_dashboard_sync_locks_guard = Lock()
-_dashboard_sync_last_success: dict[str, float] = {}
 app = FastAPI(title="Today Mail", docs_url=None, redoc_url=None)
-
-
-def _dashboard_sync_lock(user_id: str | None) -> tuple[str, Lock]:
-    """Return a process-local lock shared by dashboard syncs for this user."""
-    key = user_id or "local"
-    with _dashboard_sync_locks_guard:
-        lock = _dashboard_sync_locks.setdefault(key, Lock())
-    return key, lock
 
 
 def _rate_limit_key(request: Request) -> str:
@@ -370,101 +355,55 @@ def gmail_status(user: dict | None = Depends(_require_app_user)) -> dict[str, st
 
 @app.get("/api/dashboard/emails")
 def dashboard_emails(user: dict | None = Depends(_require_app_user)) -> dict:
-    """Return this user's saved recent-email list without waiting on Gmail or the model."""
+    """Return the signed-in user's persistent email list from Supabase."""
     started = perf_counter()
+    if not user:
+        raise HTTPException(status_code=401, detail="Sign in to view your saved inbox.")
     try:
-        user_id = user["id"] if user else None
-        cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-        if user_id:
-            delete_expired_email_cache(cutoff, user_id)
-            dashboard_items = get_recent_email_cache(user_id, cutoff)
-        else:
-            dashboard_items = []
-        log_timing("dashboard.cache_read", started, email_count=len(dashboard_items))
+        dashboard_items = get_persistent_emails(user["id"])
+        log_timing("dashboard.database_read", started, email_count=len(dashboard_items))
         return {
             "emails": dashboard_items,
             "categories": CATEGORIES,
-            "sync_status": "cached" if user_id else "live",
+            "sync_status": "database",
         }
     except Exception as exc:
-        log_timing("dashboard.cache_read", started, status="error")
-        logger.exception("Could not load cached dashboard emails")
+        log_timing("dashboard.database_read", started, status="error")
+        logger.exception("Could not load persistent dashboard emails")
         raise HTTPException(status_code=400, detail="Something went wrong. Please try again.") from exc
 
 
-def _to_dashboard_items(emails: list[dict]) -> list[dict]:
-    dashboard_items = []
-    for email in emails:
-        dashboard_items.append({
-            "id": email["id"],
-            "from": email.get("from", ""),
-            "subject": email.get("subject", "(No subject)"),
-            "received": email["received"],
-            "labels": email.get("labels", []),
-            "preview": email.get("preview") or " ".join(email.get("body", "").split())[:240],
-        })
-    return dashboard_items
+@app.post("/api/mailbox/initial-sync")
+def initial_mailbox_sync(user: dict | None = Depends(_require_app_user)) -> dict:
+    """Run the first persistent mailbox import for the signed-in app user."""
+    if not user:
+        raise HTTPException(status_code=401, detail="Sign in to sync your mailbox.")
+    try:
+        return initial_sync_mailbox(user["id"], user.get("email", ""))
+    except Exception as exc:
+        logger.exception("Could not complete initial mailbox sync")
+        raise HTTPException(status_code=400, detail="Could not sync your mailbox. Please try again.") from exc
 
 
 @app.post("/api/dashboard/sync")
 def sync_dashboard_emails(user: dict | None = Depends(_require_app_user)) -> dict:
-    """Fetch lightweight Gmail metadata, update the per-user Supabase cache, and return it."""
+    """Sync Gmail history into Supabase, then return saved emails from Supabase."""
     started = perf_counter()
-    user_id = user["id"] if user else None
-    lock_key, sync_lock = _dashboard_sync_lock(user_id)
+    if not user:
+        raise HTTPException(status_code=401, detail="Sign in to sync your saved inbox.")
     try:
-        lock_wait_started = perf_counter()
-        with sync_lock:
-            log_timing("dashboard.sync_lock_wait", lock_wait_started, user_scoped=bool(user_id))
-            now = monotonic()
-            last_success = _dashboard_sync_last_success.get(lock_key)
-            if user_id and last_success is not None:
-                freshness_age = now - last_success
-                if freshness_age < DASHBOARD_SYNC_FRESH_SECONDS:
-                    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-                    cache_started = perf_counter()
-                    try:
-                        cached_items = get_recent_email_cache(user_id, cutoff)
-                    except Exception:
-                        # A cache read failure should not prevent a fresh Gmail sync.
-                        logger.warning("Could not reuse the fresh dashboard cache; syncing Gmail.")
-                    else:
-                        log_timing(
-                            "dashboard.sync_reused_cache",
-                            cache_started,
-                            email_count=len(cached_items),
-                            age_ms=round(freshness_age * 1000),
-                        )
-                        log_timing("dashboard.sync", started, email_count=len(cached_items), reused=True)
-                        return {
-                            "emails": cached_items,
-                            "categories": CATEGORIES,
-                            "sync_status": "reused",
-                        }
-
-            fetch_started = perf_counter()
-            emails = fetch_recent_email_summaries(user_id)
-            log_timing("dashboard.gmail_fetch", fetch_started, email_count=len(emails))
-            transform_started = perf_counter()
-            dashboard_items = _to_dashboard_items(emails)
-            log_timing("dashboard.prepare_list", transform_started, email_count=len(dashboard_items))
-            if user_id:
-                cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-                cache_started = perf_counter()
-                delete_expired_email_cache(cutoff, user_id)
-                replace_recent_email_cache(user_id, dashboard_items)
-                log_timing("dashboard.cache_write", cache_started, email_count=len(dashboard_items))
-                _dashboard_sync_last_success[lock_key] = monotonic()
-            log_timing("dashboard.sync", started, email_count=len(dashboard_items), reused=False)
-            return {
-                "emails": dashboard_items,
-                "categories": CATEGORIES,
-                "sync_status": "updated",
-            }
+        sync_result = sync_persistent_mailbox(user["id"], user.get("email", ""))
+        dashboard_items = get_persistent_emails(user["id"])
+        log_timing("dashboard.database_sync", started, email_count=len(dashboard_items))
+        return {
+            "emails": dashboard_items,
+            "categories": CATEGORIES,
+            "sync_status": sync_result.get("status", "database"),
+        }
     except Exception as exc:
-        log_timing("dashboard.sync", started, status="error")
-        logger.exception("Could not sync dashboard emails")
-        raise HTTPException(status_code=400, detail="Something went wrong. Please try again.") from exc
+        log_timing("dashboard.database_sync", started, status="error")
+        logger.exception("Could not load or initialize persistent dashboard emails")
+        raise HTTPException(status_code=400, detail="Could not sync your inbox. Please try again.") from exc
 
 
 @app.post("/api/internal/process-recent-emails")
@@ -484,38 +423,49 @@ def process_recent_emails_job(
     return result
 
 
-@app.get("/api/dashboard/emails/{message_id}")
-def dashboard_email_details(message_id: str, user: dict | None = Depends(_require_app_user)) -> dict[str, str]:
-    """Fetch one full readable email body for display, without calling the model."""
+@app.get("/api/dashboard/emails/{email_id}")
+def dashboard_email_details(email_id: str, user: dict | None = Depends(_require_app_user)) -> dict[str, str]:
+    """Read one full email body from Supabase, without calling Gmail or the model."""
+    if not user:
+        raise HTTPException(status_code=401, detail="Sign in to open this email.")
     try:
-        email = fetch_email_by_id(message_id, max_body_chars=None, user_id=user["id"] if user else None)
-        email.pop("label_ids", None)
+        email = get_persistent_email_by_id(user["id"], email_id)
+        if not email:
+            raise HTTPException(status_code=404, detail="Email not found.")
         return email
     except Exception as exc:
+        if isinstance(exc, HTTPException):
+            raise
         logger.exception("Could not load dashboard email details")
         raise HTTPException(status_code=400, detail="Something went wrong. Please try again.") from exc
 
 
-@app.post("/api/dashboard/emails/{message_id}/summary")
+@app.post("/api/dashboard/emails/{email_id}/summary")
 @limiter.shared_limit(f"{MODEL_REQUESTS_PER_MINUTE}/minute", scope="model-requests-per-minute")
 @limiter.shared_limit(f"{MODEL_REQUESTS_PER_DAY}/day", scope="model-requests-per-day")
 def summarize_dashboard_email(
-    message_id: str,
+    email_id: str,
     request: Request,
     user: dict | None = Depends(_require_app_user),
 ) -> dict[str, str]:
-    """Fetch and summarize only the email selected in the dashboard."""
+    """Summarize the selected email using its body already saved in Supabase."""
+    if not user:
+        raise HTTPException(status_code=401, detail="Sign in to summarize this email.")
     started = perf_counter()
     try:
         fetch_started = perf_counter()
-        email = fetch_email_by_id(message_id, user_id=user["id"] if user else None)
-        log_timing("summary.gmail_fetch", fetch_started)
+        email = get_persistent_email_by_id(user["id"], email_id)
+        if not email:
+            raise HTTPException(status_code=404, detail="Email not found.")
+        log_timing("summary.database_read", fetch_started)
         model_started = perf_counter()
         summary = summarize_one_email(email)
         log_timing("summary.model", model_started)
         log_timing("summary.total", started)
         return {"summary": summary}
     except Exception as exc:
+        if isinstance(exc, HTTPException):
+            raise
         log_timing("summary.total", started, status="error")
         logger.exception("Could not summarize dashboard email")
         raise HTTPException(status_code=400, detail="Something went wrong. Please try again.") from exc

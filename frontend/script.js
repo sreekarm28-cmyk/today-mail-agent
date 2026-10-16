@@ -74,8 +74,7 @@ async function initAppAuth() {
         connectButton.classList.remove("connected");
         connectButton.disabled = false;
         document.querySelector("#empty-connect").disabled = false;
-        // Start cache and Gmail status requests together. The saved inbox can
-        // render while the slower Gmail status/sync request is still running.
+        // Load saved inbox data while checking the Gmail connection status.
         void startDashboard(nextUserId);
       } else {
         gmailStatus.textContent = "Connect Gmail to get started";
@@ -200,7 +199,7 @@ async function connectGmail() {
   }
 }
 
-async function loadCachedEmails() {
+async function loadDatabaseEmails() {
   const response = await apiFetch("/api/dashboard/emails");
   const payload = await response.json();
   if (!response.ok) throw new Error(payload.detail || "Could not load saved emails.");
@@ -215,7 +214,7 @@ async function syncEmails() {
   loadError.hidden = true;
   syncStatus.hidden = false;
   syncStatus.className = "sync-status";
-  syncStatus.textContent = emails.length ? "Checking Gmail for new messages…" : "Loading recent emails…";
+  syncStatus.textContent = emails.length ? "Refreshing saved inbox…" : "Loading your saved inbox…";
   if (!emails.length) {
     loadingState.hidden = false;
     emptyState.hidden = true;
@@ -223,18 +222,18 @@ async function syncEmails() {
   try {
     const response = await apiFetch("/api/dashboard/sync", { method: "POST" });
     const payload = await response.json();
-    if (!response.ok) throw new Error(payload.detail || "Could not check Gmail for new emails.");
+    if (!response.ok) throw new Error(payload.detail || "Could not refresh your saved inbox.");
     emails = payload.emails || [];
     renderDashboard();
     lastSyncAt = Date.now();
-    syncStatus.textContent = "Inbox updated · Checks automatically every 5 minutes.";
-    gmailStatus.textContent = "Gmail inbox synced";
+    syncStatus.textContent = "Saved inbox updated.";
+    gmailStatus.textContent = "Gmail connected";
     connectionNote.textContent = "Gmail connected";
   } catch (error) {
     syncStatus.classList.add("has-error");
     syncStatus.textContent = emails.length
-      ? "Could not check for new mail. Showing your saved emails."
-      : (error.message || "Could not load your emails.");
+      ? "Could not refresh. Showing your saved emails."
+      : (error.message || "Could not load your saved emails.");
     if (!emails.length) {
       showError(error.message || "Could not load your emails.");
       renderDashboard();
@@ -252,15 +251,14 @@ async function startDashboard(userId) {
   emptyState.hidden = true;
   syncStatus.hidden = false;
   syncStatus.textContent = "Loading saved emails…";
-  const cacheLoad = loadCachedEmails().catch(() => {
-    // Continue to Gmail even if the cache is temporarily unavailable.
+  const databaseLoad = loadDatabaseEmails().catch(() => {
     emails = [];
   });
   const gmailStatusCheck = updateGmailStatus();
-  await Promise.all([cacheLoad, gmailStatusCheck]);
+  await Promise.all([databaseLoad, gmailStatusCheck]);
   syncStatus.textContent = emails.length
-    ? "Showing saved emails · Checking for updates…"
-    : "Checking Gmail for recent emails…";
+    ? "Showing your saved inbox…"
+    : "Loading your mailbox…";
   if (gmailConnected) await syncEmails();
   else loadingState.hidden = true;
   if (!autoSyncTimer) {
@@ -447,11 +445,11 @@ function renderDashboard() {
   if (emails.length && !shown.length) {
     emptyState.hidden = false;
     emptyState.querySelector("h3").textContent = `No emails in ${activeFilter}`;
-    emptyState.querySelector("p").textContent = "Emails will appear here when they have this Gmail label.";
+    emptyState.querySelector("p").textContent = "Emails will appear here when they have this category.";
     document.querySelector("#empty-connect").hidden = true;
   } else {
     emptyState.querySelector("h3").textContent = "Your inbox will show up here";
-    emptyState.querySelector("p").textContent = "Connect Gmail to load messages from the last 24 hours automatically.";
+    emptyState.querySelector("p").textContent = "Connect Gmail to save your recent messages in your mailbox.";
     document.querySelector("#empty-connect").hidden = false;
   }
 }
@@ -465,7 +463,7 @@ async function openEmail(email) {
   document.querySelector("#email-dialog-cc-row").hidden = true;
   document.querySelector("#email-dialog-received").textContent = formatFullReceived(email.received);
   const body = document.querySelector("#email-dialog-body");
-  body.textContent = "Loading the email from Gmail…";
+  body.textContent = "Loading the saved email…";
   if (!emailDialog.open) emailDialog.showModal();
 
   try {

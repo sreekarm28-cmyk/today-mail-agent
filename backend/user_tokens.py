@@ -1,7 +1,8 @@
-"""Per-user Gmail connection and short-lived email cache storage in Supabase."""
+"""Per-user Gmail credentials and mailbox storage in Supabase."""
 
 import json
 import os
+from datetime import datetime, timezone
 from time import perf_counter
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -103,6 +104,297 @@ def get_gmail_connection(user_id: str) -> dict | None:
         raise RuntimeError("The saved Gmail connection could not be unlocked. Contact the app owner.") from exc
     log_timing("gmail.refresh_token_decrypt", decrypt_started)
     return {"email": row["gmail_email"], "refresh_token": refresh_token}
+
+
+def save_persistent_user_tokens(
+    user_id: str,
+    email: str,
+    access_token: str | None,
+    refresh_token: str,
+    token_expiry: str | None,
+) -> None:
+    """Store OAuth tokens encrypted in the new mailbox users table."""
+    cipher = _fernet()
+    payload = {
+        "user_id": user_id,
+        "email": email,
+        "access_token": cipher.encrypt((access_token or "").encode("utf-8")).decode("ascii"),
+        "refresh_token": cipher.encrypt(refresh_token.encode("utf-8")).decode("ascii"),
+        "token_expiry": token_expiry,
+    }
+    _request(
+        "POST",
+        "users?on_conflict=user_id",
+        payload,
+        prefer="resolution=merge-duplicates,return=minimal",
+    )
+
+
+def get_mailbox_sync_state(user_id: str) -> dict | None:
+    rows = _request(
+        "GET",
+        "sync_state?select=last_history_id,last_internal_date,initial_sync_complete,is_syncing,sync_started_at,last_synced_at"
+        f"&user_id=eq.{quote(user_id, safe='')}&limit=1",
+    )
+    return rows[0] if rows else None
+
+
+def save_mailbox_sync_state(user_id: str, values: dict) -> None:
+    _request(
+        "POST",
+        "sync_state?on_conflict=user_id",
+        {"user_id": user_id, **values},
+        prefer="resolution=merge-duplicates,return=minimal",
+    )
+
+
+def acquire_mailbox_sync_lock(user_id: str, stale_before: str) -> bool:
+    """Atomically claim this user's sync row; reclaim only an old stuck lock."""
+    user_filter = quote(user_id, safe="")
+    _request(
+        "POST",
+        "sync_state?on_conflict=user_id",
+        {"user_id": user_id},
+        prefer="resolution=ignore-duplicates,return=minimal",
+    )
+    rows = _request(
+        "PATCH",
+        "sync_state?user_id=eq." + user_filter
+        + "&or=(is_syncing.eq.false,sync_started_at.lt." + quote(stale_before, safe="") + ")"
+        + "&select=user_id",
+        {"is_syncing": True, "sync_started_at": datetime.now(timezone.utc).isoformat()},
+        prefer="return=representation",
+    )
+    return isinstance(rows, list) and bool(rows)
+
+
+def release_mailbox_sync_lock(user_id: str, synced_at: str | None = None) -> None:
+    """Release a user's sync lock even when Gmail or model work failed."""
+    _request(
+        "PATCH",
+        "sync_state?user_id=eq." + quote(user_id, safe=""),
+        {
+            "is_syncing": False,
+            "sync_started_at": None,
+            **({"last_synced_at": synced_at} if synced_at else {}),
+        },
+        prefer="return=minimal",
+    )
+
+
+def update_mailbox_sync_state(user_id: str, values: dict) -> None:
+    """Update only an existing user's sync cursor and timestamps."""
+    _request(
+        "PATCH",
+        "sync_state?user_id=eq." + quote(user_id, safe=""),
+        values,
+        prefer="return=minimal",
+    )
+
+
+def upsert_mailbox_emails(
+    user_id: str,
+    emails: list[dict],
+    classifications: dict[str, str] | None = None,
+) -> dict[str, dict]:
+    """Upsert email metadata and return Gmail-ID to database-row mappings."""
+    if not emails:
+        return {}
+    rows = []
+    for email in emails:
+        row = {
+            "user_id": user_id,
+            "gmail_message_id": email["id"],
+            "thread_id": email.get("thread_id", ""),
+            "sender": email.get("from", ""),
+            "subject": email.get("subject", "(No subject)"),
+            "snippet": email.get("preview", ""),
+            "internal_date": email["internal_date"],
+            "gmail_labels": email.get("gmail_labels", []),
+            "deleted": "TRASH" in email.get("gmail_labels", []),
+        }
+        if classifications is not None:
+            category = classifications.get(email["id"])
+            row["ai_label"] = category
+            row["ai_label_status"] = "labeled" if category else "unlabeled"
+        rows.append(row)
+
+    result_by_gmail_id = {}
+    for offset in range(0, len(rows), 200):
+        result = _request(
+            "POST",
+            "emails?on_conflict=user_id,gmail_message_id"
+            "&select=id,gmail_message_id,ai_label,ai_label_status",
+            rows[offset : offset + 200],
+            prefer="resolution=merge-duplicates,return=representation",
+        )
+        if not isinstance(result, list):
+            raise RuntimeError("Supabase returned an invalid mailbox email response.")
+        for row in result:
+            result_by_gmail_id[row["gmail_message_id"]] = row
+    return result_by_gmail_id
+
+
+def upsert_mailbox_email_bodies(user_id: str, bodies: list[dict]) -> None:
+    """Save full email text linked to its persistent email row."""
+    if not bodies:
+        return
+    for offset in range(0, len(bodies), 200):
+        _request(
+            "POST",
+            "email_bodies?on_conflict=email_id",
+            bodies[offset : offset + 200],
+            prefer="resolution=merge-duplicates,return=minimal",
+        )
+
+
+def update_mailbox_email(user_id: str, gmail_message_id: str, values: dict) -> None:
+    """Update Gmail-derived fields for one saved message."""
+    _request(
+        "PATCH",
+        "emails?user_id=eq." + quote(user_id, safe="")
+        + "&gmail_message_id=eq." + quote(gmail_message_id, safe=""),
+        values,
+        prefer="return=minimal",
+    )
+
+
+def mark_mailbox_emails_deleted(user_id: str, gmail_message_ids: list[str]) -> None:
+    """Soft-delete messages removed from Gmail or moved to Trash."""
+    for gmail_id in gmail_message_ids:
+        update_mailbox_email(user_id, gmail_id, {"deleted": True})
+
+
+def get_unlabeled_mailbox_emails(user_id: str, limit: int = 100) -> list[dict]:
+    """Load saved message text for later classification retries."""
+    user_filter = quote(user_id, safe="")
+    rows = _request(
+        "GET",
+        "emails?select=id,gmail_message_id,sender,subject,snippet,internal_date,gmail_labels,ai_label_status"
+        f"&user_id=eq.{user_filter}&ai_label_status=in.(unlabeled,failed)"
+        f"&deleted=eq.false&order=internal_date.asc&limit={max(1, min(limit, 500))}",
+    )
+    body_by_email_id = {}
+    for offset in range(0, len(rows or []), 100):
+        email_ids = [row["id"] for row in rows[offset : offset + 100]]
+        if not email_ids:
+            continue
+        body_rows = _request(
+            "GET",
+            "email_bodies?select=email_id,body&user_id=eq." + user_filter
+            + "&email_id=in.(" + ",".join(email_ids) + ")&limit=100",
+        )
+        body_by_email_id.update({
+            row["email_id"]: row.get("body", "")
+            for row in body_rows or []
+            if isinstance(row, dict) and row.get("email_id")
+        })
+    pending = []
+    for row in rows or []:
+        pending.append({
+            "id": row["gmail_message_id"],
+            "database_id": row["id"],
+            "from": row.get("sender", ""),
+            "subject": row.get("subject", ""),
+            "preview": row.get("snippet", ""),
+            "internal_date": int(row["internal_date"]),
+            "gmail_labels": row.get("gmail_labels", []),
+            "received": datetime.fromtimestamp(int(row["internal_date"]) / 1000, tz=timezone.utc).isoformat(),
+            "body": body_by_email_id.get(row["id"], ""),
+        })
+    return pending
+
+
+def get_persistent_gmail_ids_since(user_id: str, cutoff_ms: int) -> set[str]:
+    """List saved Gmail IDs at or after a date, for expired-cursor reconciliation."""
+    rows = _request(
+        "GET",
+        "emails?select=gmail_message_id"
+        "&user_id=eq." + quote(user_id, safe="")
+        + "&internal_date=gte." + str(max(0, int(cutoff_ms)))
+        + "&deleted=eq.false&limit=1000",
+    )
+    return {
+        row["gmail_message_id"]
+        for row in rows or []
+        if isinstance(row, dict) and row.get("gmail_message_id")
+    }
+
+
+def get_persistent_emails(user_id: str) -> list[dict]:
+    """Read this user's non-deleted email list from the persistent mailbox tables."""
+    rows = []
+    offset = 0
+    page_size = 500
+    user_filter = quote(user_id, safe="")
+    while True:
+        page = _request(
+            "GET",
+            "emails?select=id,gmail_message_id,sender,subject,snippet,internal_date,gmail_labels,ai_label,ai_label_status"
+            f"&user_id=eq.{user_filter}&deleted=eq.false"
+            f"&order=internal_date.desc&limit={page_size}&offset={offset}",
+        )
+        if not isinstance(page, list):
+            raise RuntimeError("Supabase returned an invalid mailbox email list.")
+        rows.extend(page)
+        if len(page) < page_size:
+            break
+        offset += page_size
+
+    emails = []
+    for row in rows:
+        labels = row.get("gmail_labels", [])
+        if not isinstance(labels, list):
+            labels = []
+        ai_label = row.get("ai_label") if row.get("ai_label_status") == "labeled" else None
+        dashboard_labels = list(labels)
+        if ai_label and ai_label not in dashboard_labels:
+            dashboard_labels.append(ai_label)
+        internal_date = int(row["internal_date"])
+        received = datetime.fromtimestamp(internal_date / 1000, tz=timezone.utc)
+        emails.append({
+            "id": row["id"],
+            "gmail_message_id": row["gmail_message_id"],
+            "from": row.get("sender", ""),
+            "subject": row.get("subject", "(No subject)"),
+            "received": received.isoformat(timespec="minutes"),
+            "preview": row.get("snippet", ""),
+            "labels": dashboard_labels,
+            "ai_label": ai_label,
+            "ai_label_status": row.get("ai_label_status", "unlabeled"),
+        })
+    return emails
+
+
+def get_persistent_email_by_id(user_id: str, email_id: str) -> dict | None:
+    """Read one email and body, restricted to the owning user."""
+    user_filter = quote(user_id, safe="")
+    email_filter = quote(email_id, safe="")
+    rows = _request(
+        "GET",
+        "emails?select=id,gmail_message_id,sender,subject,internal_date,gmail_labels,ai_label,ai_label_status"
+        f"&id=eq.{email_filter}&user_id=eq.{user_filter}&deleted=eq.false&limit=1",
+    )
+    if not rows:
+        return None
+    row = rows[0]
+    body_rows = _request(
+        "GET",
+        "email_bodies?select=body"
+        f"&email_id=eq.{email_filter}&user_id=eq.{user_filter}&limit=1",
+    )
+    internal_date = int(row["internal_date"])
+    received = datetime.fromtimestamp(internal_date / 1000, tz=timezone.utc)
+    return {
+        "id": row["id"],
+        "gmail_message_id": row["gmail_message_id"],
+        "from": row.get("sender", ""),
+        "subject": row.get("subject", "(No subject)"),
+        "received": received.isoformat(timespec="minutes"),
+        "body": body_rows[0].get("body", "") if body_rows else "",
+        "labels": row.get("gmail_labels", []),
+        "ai_label": row.get("ai_label") if row.get("ai_label_status") == "labeled" else None,
+    }
 
 
 def list_gmail_connections() -> list[dict[str, str]]:

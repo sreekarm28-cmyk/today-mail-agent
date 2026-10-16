@@ -3,7 +3,7 @@ name: Process recent Gmail
 on:
   schedule:
     # GitHub schedules use UTC by default; avoid the top of the hour when possible.
-    - cron: "17,47 * * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 permissions:

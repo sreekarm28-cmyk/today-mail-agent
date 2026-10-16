@@ -2,22 +2,37 @@
 
 import json
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from time import perf_counter
 
 from .email_tool import (
     apply_user_label,
     ensure_user_labels,
+    fetch_initial_mailbox_messages,
     fetch_recent_emails,
-    fetch_recent_email_summaries,
+    fetch_gmail_history_changes,
+    prepare_initial_mailbox_sync,
+    prepare_incremental_mailbox_sync,
 )
 from .diagnostics import log_timing
 from .llm import chat
 from .observability import flush_client, get_langfuse_client, observation, record_metadata
 from .user_tokens import (
-    delete_expired_email_cache,
+    acquire_mailbox_sync_lock,
+    get_gmail_connection,
+    get_mailbox_sync_state,
+    get_persistent_gmail_ids_since,
+    get_unlabeled_mailbox_emails,
     list_gmail_connections,
-    replace_recent_email_cache,
+    mark_mailbox_emails_deleted,
+    release_mailbox_sync_lock,
+    save_mailbox_sync_state,
+    save_persistent_user_tokens,
+    update_mailbox_email,
+    update_mailbox_sync_state,
+    upsert_mailbox_email_bodies,
+    upsert_mailbox_emails,
 )
 
 logger = logging.getLogger(__name__)
@@ -155,6 +170,262 @@ def classify_batch(
     return categories_by_id
 
 
+def _initial_sync_mailbox(user_id: str, user_email: str = "") -> dict[str, int | str | bool]:
+    """Import a user's recent Gmail messages and bodies into the persistent tables once."""
+    current_state = get_mailbox_sync_state(user_id)
+    if current_state and current_state.get("initial_sync_complete"):
+        return {"status": "already_complete", "email_count": 0, "classified": 0, "unlabeled": 0}
+
+    try:
+        days = int(os.getenv("EMAIL_INITIAL_SYNC_DAYS", "30"))
+    except ValueError as exc:
+        raise RuntimeError("EMAIL_INITIAL_SYNC_DAYS must be a whole number.") from exc
+    if not 1 <= days <= 365:
+        raise RuntimeError("EMAIL_INITIAL_SYNC_DAYS must be between 1 and 365.")
+
+    service, credentials, history_id, cutoff_ms = prepare_initial_mailbox_sync(user_id, days)
+    sync_started_at = datetime.now(timezone.utc).isoformat()
+    # Save Gmail's starting history ID before listing or downloading messages.
+    save_mailbox_sync_state(
+        user_id,
+        {
+            "last_history_id": history_id,
+            "last_internal_date": cutoff_ms,
+            "initial_sync_complete": False,
+            "sync_started_at": sync_started_at,
+        },
+    )
+
+    connection = get_gmail_connection(user_id)
+    if not connection:
+        raise RuntimeError("Connect your Gmail account before syncing the mailbox.")
+    expiry = credentials.expiry.isoformat() if credentials.expiry else None
+    save_persistent_user_tokens(
+        user_id,
+        user_email or connection["email"],
+        credentials.token,
+        connection["refresh_token"],
+        expiry,
+    )
+
+    fetch_started = perf_counter()
+    emails = fetch_initial_mailbox_messages(service, cutoff_ms)
+    log_timing("mailbox.initial_fetch", fetch_started, email_count=len(emails), days=days)
+
+    write_started = perf_counter()
+    saved_rows = upsert_mailbox_emails(user_id, emails)
+    body_rows = [
+        {
+            "email_id": saved_rows[email["id"]]["id"],
+            "user_id": user_id,
+            "body": email.get("body", ""),
+        }
+        for email in emails
+        if email["id"] in saved_rows
+    ]
+    upsert_mailbox_email_bodies(user_id, body_rows)
+    log_timing(
+        "mailbox.initial_database_write",
+        write_started,
+        email_count=len(saved_rows),
+        body_count=len(body_rows),
+    )
+
+    pending = [
+        email for email in emails
+        if saved_rows.get(email["id"], {}).get("ai_label_status") != "labeled"
+    ]
+    # The same helper stores the AI category and mirrors it to Gmail.
+    classified, classification_failures = _classify_persistent_emails(user_id, pending)
+
+    newest_internal_date = max(
+        (email["internal_date"] for email in emails),
+        default=cutoff_ms,
+    )
+    completed_at = datetime.now(timezone.utc).isoformat()
+    save_mailbox_sync_state(
+        user_id,
+        {
+            "initial_sync_complete": True,
+            "is_syncing": False,
+            "sync_started_at": None,
+            "last_synced_at": completed_at,
+            "last_internal_date": newest_internal_date,
+        },
+    )
+    return {
+        "status": "complete",
+        "email_count": len(saved_rows),
+        "classified": classified,
+        "unlabeled": classification_failures,
+    }
+
+
+def initial_sync_mailbox(user_id: str, user_email: str = "") -> dict[str, int | str | bool]:
+    """Run initial import with a per-user lock so two requests cannot overlap."""
+    state = get_mailbox_sync_state(user_id)
+    if state and state.get("initial_sync_complete"):
+        return {"status": "already_complete", "email_count": 0, "classified": 0, "unlabeled": 0}
+    stale_before = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    if not acquire_mailbox_sync_lock(user_id, stale_before):
+        return {"status": "sync_in_progress", "email_count": 0, "classified": 0, "unlabeled": 0}
+    try:
+        return _initial_sync_mailbox(user_id, user_email)
+    finally:
+        release_mailbox_sync_lock(user_id)
+
+
+def _classify_persistent_emails(user_id: str, emails: list[dict]) -> tuple[int, int]:
+    """Classify saved email bodies, persist categories, and mirror labels to Gmail."""
+    if not emails:
+        return 0, 0
+    label_rows = ensure_user_labels(CLASSIFICATION_CATEGORIES, user_id)
+    label_ids = {label["name"]: label["id"] for label in label_rows}
+    classified = failed = 0
+    for offset in range(0, len(emails), CLASSIFICATION_BATCH_SIZE):
+        batch = emails[offset : offset + CLASSIFICATION_BATCH_SIZE]
+        try:
+            assignments = classify_batch(batch)
+            saved = upsert_mailbox_emails(user_id, batch, assignments)
+            for email_id, category in assignments.items():
+                try:
+                    apply_user_label(email_id, label_ids[category], category, user_id)
+                    row = saved.get(email_id)
+                    if row:
+                        existing_labels = next(
+                            (email.get("gmail_labels", []) for email in batch if email["id"] == email_id),
+                            [],
+                        )
+                        if category not in existing_labels:
+                            existing_labels.append(category)
+                        update_mailbox_email(
+                            user_id,
+                            email_id,
+                            {"gmail_labels": existing_labels, "deleted": False},
+                        )
+                    classified += 1
+                except Exception as exc:
+                    failed += 1
+                    upsert_mailbox_emails(user_id, [next(item for item in batch if item["id"] == email_id)], {})
+                    logger.warning(
+                        "Could not apply a Gmail label (%s); saved email remains retryable.",
+                        type(exc).__name__,
+                    )
+        except Exception as exc:
+            failed += len(batch)
+            upsert_mailbox_emails(user_id, batch, {})
+            logger.warning(
+                "Persistent email classification failed (%s); emails remain unlabeled.",
+                type(exc).__name__,
+            )
+    return classified, failed
+
+
+def _history_expired(exc: Exception) -> bool:
+    return getattr(getattr(exc, "resp", None), "status", None) == 404
+
+
+def sync_persistent_mailbox(user_id: str, user_email: str = "") -> dict[str, int | str]:
+    """Apply Gmail history changes to Supabase, retry labels, then advance the cursor."""
+    state = get_mailbox_sync_state(user_id)
+    if not state or not state.get("initial_sync_complete"):
+        initial = initial_sync_mailbox(user_id, user_email)
+        if initial.get("status") == "sync_in_progress":
+            return {"status": "sync_in_progress", "checked": 0, "classified": 0, "failed": 0}
+        state = get_mailbox_sync_state(user_id)
+        if not state or not state.get("initial_sync_complete"):
+            return {"status": "initial_sync_pending", "checked": 0, "classified": 0, "failed": 0}
+
+    stale_before = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    if not acquire_mailbox_sync_lock(user_id, stale_before):
+        return {"status": "sync_in_progress", "checked": 0, "classified": 0, "failed": 0}
+
+    completed_at = None
+    try:
+        state = get_mailbox_sync_state(user_id) or {}
+        saved_history_id = state.get("last_history_id")
+        if not saved_history_id:
+            raise RuntimeError("The saved Gmail history cursor is missing.")
+        service, credentials, current_history_id = prepare_incremental_mailbox_sync(user_id)
+        token_connection = get_gmail_connection(user_id)
+        if token_connection:
+            save_persistent_user_tokens(
+                user_id,
+                user_email or token_connection["email"],
+                credentials.token,
+                token_connection["refresh_token"],
+                credentials.expiry.isoformat() if credentials.expiry else None,
+            )
+
+        fallback_used = False
+        try:
+            changes = fetch_gmail_history_changes(service, str(saved_history_id))
+        except Exception as exc:
+            if not _history_expired(exc):
+                raise
+            fallback_used = True
+            overlap_ms = 5 * 60 * 1000
+            last_date = int(state.get("last_internal_date") or 0)
+            if last_date:
+                cutoff_ms = max(0, last_date - overlap_ms)
+            else:
+                days = max(1, min(int(os.getenv("EMAIL_INITIAL_SYNC_DAYS", "30")), 365))
+                cutoff_ms = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp() * 1000)
+            changes = {
+                "history_id": current_history_id,
+                "emails": fetch_initial_mailbox_messages(service, cutoff_ms),
+                "deleted_ids": [],
+            }
+            live_ids = {email["id"] for email in changes["emails"]}
+            changes["deleted_ids"] = sorted(
+                get_persistent_gmail_ids_since(user_id, cutoff_ms) - live_ids
+            )
+            logger.info("Gmail history cursor expired; using overlapping recent-mail fallback.")
+
+        changed_emails = changes["emails"]
+        deleted_ids = changes["deleted_ids"]
+        if changed_emails:
+            rows = upsert_mailbox_emails(user_id, changed_emails)
+            body_rows = [
+                {
+                    "email_id": rows[email["id"]]["id"],
+                    "user_id": user_id,
+                    "body": email.get("body", ""),
+                }
+                for email in changed_emails
+                if email["id"] in rows
+            ]
+            upsert_mailbox_email_bodies(user_id, body_rows)
+        if deleted_ids:
+            mark_mailbox_emails_deleted(user_id, deleted_ids)
+
+        # New or previously failed classifications reuse saved bodies.
+        pending = get_unlabeled_mailbox_emails(user_id, limit=500)
+        classified, failed = _classify_persistent_emails(user_id, pending)
+        max_internal_date = max(
+            [int(state.get("last_internal_date") or 0)]
+            + [int(email["internal_date"]) for email in changed_emails]
+        )
+        # Move the cursor only after message data, bodies, deletions, and labels
+        # have been written successfully.
+        update_mailbox_sync_state(
+            user_id,
+            {
+                "last_history_id": changes["history_id"],
+                "last_internal_date": max_internal_date,
+            },
+        )
+        completed_at = datetime.now(timezone.utc).isoformat()
+        return {
+            "status": "partial" if failed else ("fallback" if fallback_used else "success"),
+            "checked": len(changed_emails),
+            "classified": classified,
+            "failed": failed,
+        }
+    finally:
+        release_mailbox_sync_lock(user_id, synced_at=completed_at)
+
+
 def summarize_one_email(email: dict[str, str]) -> str:
     """Summarize one selected email without fetching or summarizing other emails."""
     prompt = (
@@ -288,14 +559,7 @@ def classify_recent_emails(
 
 
 def process_scheduled_emails() -> dict[str, int | str]:
-    """Fetch and classify recent inbox messages for each connected app user."""
-    cache_cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-    try:
-        delete_expired_email_cache(cache_cutoff)
-    except Exception as exc:
-        # Cache cleanup must not prevent Gmail classification from running.
-        logger.warning("Could not clean expired dashboard cache (%s).", type(exc).__name__)
-
+    """Incrementally sync every connected mailbox into the persistent database."""
     connections = list_gmail_connections()
     result: dict[str, int | str] = {
         "status": "success",
@@ -311,30 +575,13 @@ def process_scheduled_emails() -> dict[str, int | str]:
     for connection in connections:
         user_id = connection["user_id"]
         try:
-            emails = fetch_recent_emails(user_id)
-            classification = classify_recent_emails(emails, user_id)
+            sync_result = sync_persistent_mailbox(user_id)
             result["processed_accounts"] += 1
-            result["emails_checked"] += len(emails)
-            result["classified"] += int(classification["classified"])
-            result["already_classified"] += int(classification["already_classified"])
-            result["failed_emails"] += int(classification["failed"])
-            try:
-                summaries = fetch_recent_email_summaries(user_id)
-                cache_rows = [
-                    {
-                        "id": email["id"],
-                        "from": email.get("from", ""),
-                        "subject": email.get("subject", "(No subject)"),
-                        "received": email["received"],
-                        "preview": email.get("preview", ""),
-                        "labels": email.get("labels", []),
-                    }
-                    for email in summaries
-                ]
-                replace_recent_email_cache(user_id, cache_rows)
-            except Exception as cache_exc:
-                # A cache issue should not undo or misreport Gmail labeling.
-                logger.warning("Could not refresh dashboard cache for one account (%s).", type(cache_exc).__name__)
+            result["emails_checked"] += int(sync_result.get("checked", 0))
+            result["classified"] += int(sync_result.get("classified", 0))
+            result["failed_emails"] += int(sync_result.get("failed", 0))
+            if sync_result.get("status") == "sync_in_progress":
+                result["already_classified"] += 1
         except Exception as exc:
             # Keep processing other users; do not put mailbox data in scheduler logs.
             logger.warning("Scheduled Gmail processing failed for one connection (%s).", type(exc).__name__)

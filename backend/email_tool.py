@@ -24,6 +24,7 @@ OAUTH_CLIENT_FILE = APP_DATA_DIR / "credentials.json"
 _CREDENTIAL_SERVICE = "today-mail-agent"
 _TOKEN_KEY_NAME = "GOOGLE_OAUTH_TOKEN"
 GMAIL_BATCH_SIZE = 100
+GMAIL_RAW_BATCH_SIZE = 10
 
 
 class _HTMLText(HTMLParser):
@@ -295,6 +296,226 @@ def _fetch_message_metadata_in_batches(service, message_ids: list[dict]) -> dict
     if errors:
         raise errors[0]
     return messages_by_id
+
+
+def prepare_initial_mailbox_sync(user_id: str, days: int):
+    """Build one Gmail client and read the history ID before listing mailbox messages."""
+    credentials = _credentials(user_id)
+    service_started = perf_counter()
+    service = _gmail_service(user_id, credentials=credentials)
+    log_timing("gmail.client_ready", service_started)
+    profile = service.users().getProfile(userId="me").execute()
+    history_id = profile.get("historyId")
+    if not history_id:
+        raise RuntimeError("Gmail did not return a history ID for the initial sync.")
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    return service, credentials, str(history_id), int(cutoff.timestamp() * 1000)
+
+
+def fetch_initial_mailbox_messages(service, cutoff_ms: int) -> list[dict]:
+    """Fetch all non-spam, non-trash messages newer than the cutoff, including bodies."""
+    label_response = service.users().labels().list(userId="me").execute()
+    label_names_by_id = {
+        label["id"]: label["name"]
+        for label in label_response.get("labels", [])
+        if label.get("id") and label.get("name")
+    }
+
+    message_ids = []
+    page_token = None
+    list_started = perf_counter()
+    while True:
+        arguments = {
+            "userId": "me",
+            "q": f"after:{cutoff_ms // 1000}",
+            "maxResults": 500,
+        }
+        if page_token:
+            arguments["pageToken"] = page_token
+        response = service.users().messages().list(**arguments).execute()
+        message_ids.extend(response.get("messages", []))
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            break
+    log_timing("gmail.initial_message_list", list_started, candidate_count=len(message_ids))
+
+    results = []
+    content_started = perf_counter()
+    for offset in range(0, len(message_ids), GMAIL_RAW_BATCH_SIZE):
+        batch_items = message_ids[offset : offset + GMAIL_RAW_BATCH_SIZE]
+        messages_by_id = {}
+        batch_errors = []
+        request_ids = {str(index): item["id"] for index, item in enumerate(batch_items)}
+
+        def on_response(request_id, response, exception):
+            message_id = request_ids[request_id]
+            if exception is not None:
+                batch_errors.append(exception)
+            else:
+                messages_by_id[message_id] = response
+
+        batch = service.new_batch_http_request()
+        for request_id, item in zip(request_ids, batch_items):
+            request = service.users().messages().get(
+                userId="me", id=item["id"], format="raw"
+            )
+            batch.add(request, request_id=request_id, callback=on_response)
+        batch_started = perf_counter()
+        batch.execute()
+        log_timing(
+            "gmail.initial_raw_batch",
+            batch_started,
+            request_count=len(batch_items),
+        )
+        if batch_errors:
+            raise batch_errors[0]
+
+        for item in batch_items:
+            message_data = messages_by_id[item["id"]]
+            internal_ms = message_data.get("internalDate")
+            if not internal_ms or int(internal_ms) < cutoff_ms:
+                continue
+            raw = message_data.get("raw")
+            if not raw:
+                continue
+            padding = "=" * (-len(raw) % 4)
+            message = message_from_bytes(base64.urlsafe_b64decode(raw + padding))
+            internal_date = int(internal_ms)
+            received = datetime.fromtimestamp(internal_date / 1000, tz=timezone.utc)
+            label_ids = message_data.get("labelIds", [])
+            results.append({
+                "id": item["id"],
+                "thread_id": message_data.get("threadId", ""),
+                "from": _decode(message.get("From")),
+                "subject": _decode(message.get("Subject")) or "(No subject)",
+                "received": received.isoformat(timespec="seconds"),
+                "internal_date": internal_date,
+                "preview": message_data.get("snippet", ""),
+                "gmail_labels": [
+                    label_names_by_id[label_id]
+                    for label_id in label_ids
+                    if label_id in label_names_by_id
+                ],
+                "body": _body(message),
+            })
+
+    log_timing(
+        "gmail.initial_message_content",
+        content_started,
+        requested_count=len(message_ids),
+        returned_count=len(results),
+    )
+    return results
+
+
+def prepare_incremental_mailbox_sync(user_id: str):
+    """Return a Gmail client and the current cursor used for history fallback."""
+    credentials = _credentials(user_id)
+    started = perf_counter()
+    service = _gmail_service(user_id, credentials=credentials)
+    log_timing("gmail.client_ready", started)
+    profile = service.users().getProfile(userId="me").execute()
+    history_id = profile.get("historyId")
+    if not history_id:
+        raise RuntimeError("Gmail did not return a history ID.")
+    return service, credentials, str(history_id)
+
+
+def fetch_gmail_history_changes(service, start_history_id: str) -> dict:
+    """Read every Gmail history page and fetch the current full data for changed mail."""
+    changed_ids: set[str] = set()
+    deleted_ids: set[str] = set()
+    page_token = None
+    latest_history_id = start_history_id
+    started = perf_counter()
+    while True:
+        arguments = {
+            "userId": "me",
+            "startHistoryId": start_history_id,
+            "maxResults": 500,
+        }
+        if page_token:
+            arguments["pageToken"] = page_token
+        response = service.users().history().list(**arguments).execute()
+        latest_history_id = str(response.get("historyId") or latest_history_id)
+        for item in response.get("history", []):
+            for deleted in item.get("messagesDeleted", []):
+                message_id = (deleted.get("message") or {}).get("id")
+                if message_id:
+                    deleted_ids.add(message_id)
+                    changed_ids.discard(message_id)
+            for key in ("messagesAdded", "labelsAdded", "labelsRemoved"):
+                for changed in item.get(key, []):
+                    message_id = (changed.get("message") or {}).get("id")
+                    if message_id and message_id not in deleted_ids:
+                        changed_ids.add(message_id)
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            break
+    log_timing(
+        "gmail.history_list",
+        started,
+        changed_count=len(changed_ids),
+        deleted_count=len(deleted_ids),
+    )
+
+    label_started = perf_counter()
+    labels = service.users().labels().list(userId="me").execute().get("labels", [])
+    label_names = {
+        label["id"]: label["name"]
+        for label in labels
+        if label.get("id") and label.get("name")
+    }
+    log_timing("gmail.labels_list", label_started, label_count=len(label_names))
+
+    emails = []
+    not_found = set()
+    content_started = perf_counter()
+    for gmail_id in sorted(changed_ids):
+        try:
+            message_data = service.users().messages().get(
+                userId="me", id=gmail_id, format="raw"
+            ).execute()
+        except Exception as exc:
+            if getattr(getattr(exc, "resp", None), "status", None) == 404:
+                not_found.add(gmail_id)
+                continue
+            raise
+        raw = message_data.get("raw")
+        internal_ms = message_data.get("internalDate")
+        if not raw or not internal_ms:
+            continue
+        raw_padding = "=" * (-len(raw) % 4)
+        parsed = message_from_bytes(base64.urlsafe_b64decode(raw + raw_padding))
+        internal_date = int(internal_ms)
+        label_ids = message_data.get("labelIds", [])
+        gmail_labels = [label_names[label_id] for label_id in label_ids if label_id in label_names]
+        emails.append({
+            "id": gmail_id,
+            "thread_id": message_data.get("threadId", ""),
+            "from": _decode(parsed.get("From")),
+            "subject": _decode(parsed.get("Subject")) or "(No subject)",
+            "received": datetime.fromtimestamp(internal_date / 1000, tz=timezone.utc).isoformat(timespec="seconds"),
+            "internal_date": internal_date,
+            "preview": message_data.get("snippet", ""),
+            "gmail_labels": gmail_labels,
+            "body": _body(parsed),
+        })
+        if "TRASH" in label_ids:
+            deleted_ids.add(gmail_id)
+    deleted_ids.update(not_found)
+    log_timing(
+        "gmail.history_message_details",
+        content_started,
+        requested_count=len(changed_ids),
+        returned_count=len(emails),
+        not_found_count=len(not_found),
+    )
+    return {
+        "history_id": latest_history_id,
+        "emails": emails,
+        "deleted_ids": sorted(deleted_ids),
+    }
 
 
 def fetch_recent_email_summaries(user_id: str | None = None) -> list[dict[str, str | list[str]]]:

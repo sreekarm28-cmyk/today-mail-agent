@@ -27,6 +27,7 @@ let currentSession = null;
 let activeUserId = null;
 let dashboardLoadedUserId = null;
 let gmailConnected = false;
+let gmailStatusChecked = false;
 let syncInFlight = false;
 let lastSyncAt = 0;
 let autoSyncTimer = null;
@@ -61,6 +62,7 @@ async function initAppAuth() {
         activeUserId = nextUserId;
         dashboardLoadedUserId = null;
         gmailConnected = false;
+        gmailStatusChecked = false;
         lastSyncAt = 0;
         renderDashboard();
       }
@@ -157,9 +159,14 @@ async function updateGmailStatus() {
       connectButton.classList.remove("connected");
       document.querySelector("#empty-connect").hidden = false;
     }
+    gmailStatusChecked = true;
+    renderDashboard();
   } catch (error) {
     gmailStatus.textContent = error.message || "Could not check Gmail connection.";
     gmailConnected = false;
+    gmailStatusChecked = true;
+    connectionNote.textContent = "Gmail status unavailable";
+    renderDashboard();
   }
 }
 
@@ -168,6 +175,7 @@ document.querySelector("#current-date").textContent = new Intl.DateTimeFormat("e
 }).format(new Date());
 
 function setConnected(email) {
+  gmailStatusChecked = true;
   gmailStatus.textContent = `Connected as ${email}`;
   connectionNote.textContent = "Gmail connected";
   connectButton.textContent = "Gmail connected ✓";
@@ -188,6 +196,7 @@ async function connectGmail() {
     }
     setConnected(payload.email);
     gmailConnected = true;
+    renderDashboard();
     dashboardLoadedUserId = null;
     await startDashboard(currentSession?.user?.id || "local-user");
   } catch (error) {
@@ -429,7 +438,11 @@ function renderDashboard() {
     : "Your recent mail, in one place";
   document.querySelector("#summary-subtitle").textContent = emails.length
     ? "Use a category to narrow the list, or summarize one email."
-    : "Connect Gmail to load your recent inbox automatically.";
+    : !gmailStatusChecked
+      ? "Checking your Gmail connection…"
+      : gmailConnected
+        ? "Gmail is connected. New messages will appear here after syncing."
+        : "Connect Gmail to load your recent inbox automatically.";
   const shown = activeFilter === "All mail"
     ? emails
     : emails.filter((email) => matchingCategory(email) === activeFilter);
@@ -456,8 +469,12 @@ function renderDashboard() {
     document.querySelector("#empty-connect").hidden = true;
   } else {
     emptyState.querySelector("h3").textContent = "Your inbox will show up here";
-    emptyState.querySelector("p").textContent = "Connect Gmail to save your recent messages in your mailbox.";
-    document.querySelector("#empty-connect").hidden = false;
+    emptyState.querySelector("p").textContent = !gmailStatusChecked
+      ? "Checking your Gmail connection…"
+      : gmailConnected
+        ? "Gmail is connected. No messages have appeared in the last 24 hours yet."
+        : "Connect Gmail to save your recent messages in your mailbox.";
+    document.querySelector("#empty-connect").hidden = gmailConnected || !gmailStatusChecked;
   }
 }
 

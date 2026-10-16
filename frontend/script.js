@@ -20,6 +20,7 @@ const connectionNote = document.querySelector("#connection-note");
 const emailDialog = document.querySelector("#email-dialog");
 const summaryDialog = document.querySelector("#summary-dialog");
 let emails = [];
+let selectedEmail = null;
 let activeFilter = "All mail";
 let supabaseClient = null;
 let currentSession = null;
@@ -455,6 +456,7 @@ function renderDashboard() {
 }
 
 async function openEmail(email) {
+  selectedEmail = email;
   document.querySelector("#email-dialog-subject").textContent = email.subject || "Email";
   document.querySelector("#email-dialog-from").textContent = email.from || "Unknown sender";
   document.querySelector("#email-dialog-to").textContent = "";
@@ -489,6 +491,33 @@ async function openEmail(email) {
   }
 }
 
+async function hideEmailFromApp() {
+  if (!selectedEmail) return;
+  const emailToHide = selectedEmail;
+  const button = document.querySelector("#hide-email-button");
+  if (!window.confirm("Remove this email from this app? It will remain in Gmail.")) return;
+
+  button.disabled = true;
+  button.textContent = "Removing…";
+  try {
+    const response = await apiFetch(`/api/dashboard/emails/${encodeURIComponent(emailToHide.id)}`, { method: "DELETE" });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || "Could not remove this email.");
+    emails = emails.filter((email) => email.id !== emailToHide.id);
+    selectedEmail = null;
+    emailDialog.close();
+    renderDashboard();
+    syncStatus.hidden = false;
+    syncStatus.className = "sync-status";
+    syncStatus.textContent = "Email removed from this app. It remains in Gmail.";
+  } catch (error) {
+    showError(error.message || "Could not remove this email.");
+  } finally {
+    button.disabled = false;
+    button.textContent = "Remove from app";
+  }
+}
+
 async function summarizeEmail(email, button) {
   const originalText = button.innerHTML;
   button.disabled = true;
@@ -512,6 +541,7 @@ async function summarizeEmail(email, button) {
 connectButton.addEventListener("click", connectGmail);
 document.querySelector("#empty-connect").addEventListener("click", connectGmail);
 document.querySelector("#close-email-dialog").addEventListener("click", () => emailDialog.close());
+document.querySelector("#hide-email-button").addEventListener("click", hideEmailFromApp);
 emailDialog.addEventListener("click", (event) => {
   if (event.target === emailDialog) emailDialog.close();
 });

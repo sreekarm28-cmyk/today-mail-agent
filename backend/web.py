@@ -34,6 +34,7 @@ from .runtime import (
 )
 from .user_tokens import (
     get_gmail_connection,
+    hide_persistent_email,
     get_persistent_email_by_id,
     get_persistent_emails,
     save_gmail_connection,
@@ -438,6 +439,22 @@ def dashboard_email_details(email_id: str, user: dict | None = Depends(_require_
             raise
         logger.exception("Could not load dashboard email details")
         raise HTTPException(status_code=400, detail="Something went wrong. Please try again.") from exc
+
+
+@app.delete("/api/dashboard/emails/{email_id}")
+def hide_dashboard_email(email_id: str, user: dict | None = Depends(_require_app_user)) -> dict[str, str]:
+    """Hide a saved email from the app without deleting it from Gmail."""
+    if not user:
+        raise HTTPException(status_code=401, detail="Sign in to remove this email.")
+    try:
+        if not hide_persistent_email(user["id"], email_id):
+            raise HTTPException(status_code=404, detail="Email not found in your app inbox.")
+        return {"status": "hidden", "message": "Email removed from this app. It remains in Gmail."}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Could not hide dashboard email")
+        raise HTTPException(status_code=400, detail="Could not remove this email. Please try again.") from exc
 
 
 @app.post("/api/dashboard/emails/{email_id}/summary")

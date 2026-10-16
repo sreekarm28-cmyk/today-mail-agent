@@ -100,7 +100,10 @@
         <div><span>Received</span><p id="email-dialog-received"></p></div>
       </div>
       <div id="email-dialog-body" class="email-dialog-body" aria-live="polite"></div>
-      <div class="dialog-footer">Email content is shown as readable text from Gmail.</div>
+      <div class="email-dialog-footer">
+        <span>Email content is shown as readable text from Gmail.</span>
+        <button id="hide-email-button" class="hide-email-button" type="button">Remove from app</button>
+      </div>
     </dialog>
     <dialog id="summary-dialog" class="summary-dialog">
       <div class="dialog-top"><div><span class="dialog-kicker">MAIL SUMMARY</span><h2 id="dialog-subject">Email summary</h2></div><button id="close-dialog" class="close-dialog" type="button" aria-label="Close summary">×</button></div>

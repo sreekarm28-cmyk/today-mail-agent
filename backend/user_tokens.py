@@ -271,6 +271,19 @@ def mark_mailbox_emails_deleted(user_id: str, gmail_message_ids: list[str]) -> N
         update_mailbox_email(user_id, gmail_id, {"deleted": True})
 
 
+def hide_persistent_email(user_id: str, email_id: str) -> bool:
+    """Hide one saved email from this user's app without changing Gmail."""
+    rows = _request(
+        "PATCH",
+        "emails?id=eq." + quote(email_id, safe="")
+        + "&user_id=eq." + quote(user_id, safe="")
+        + "&hidden_in_app=eq.false&deleted=eq.false",
+        {"hidden_in_app": True},
+        prefer="return=representation",
+    )
+    return isinstance(rows, list) and bool(rows)
+
+
 def get_unlabeled_mailbox_emails(user_id: str, limit: int = 100) -> list[dict]:
     """Load saved message text for later classification retries."""
     from .email_tool import normalize_email_body
@@ -282,7 +295,8 @@ def get_unlabeled_mailbox_emails(user_id: str, limit: int = 100) -> list[dict]:
         "emails?select=id,gmail_message_id,sender,subject,snippet,internal_date,gmail_labels,ai_label_status"
         f"&user_id=eq.{user_filter}&ai_label_status=in.(unlabeled,failed)"
         f"&internal_date=gte.{cutoff_ms}"
-        f"&deleted=eq.false&order=internal_date.asc&limit={max(1, min(limit, 500))}",
+        f"&deleted=eq.false&hidden_in_app=eq.false"
+        f"&order=internal_date.asc&limit={max(1, min(limit, 500))}",
     )
     body_by_email_id = {}
     for offset in range(0, len(rows or []), 100):
@@ -343,6 +357,7 @@ def get_persistent_emails(user_id: str) -> list[dict]:
             "GET",
             "emails?select=id,gmail_message_id,sender,subject,snippet,internal_date,gmail_labels,ai_label,ai_label_status"
             f"&user_id=eq.{user_filter}&deleted=eq.false"
+            f"&hidden_in_app=eq.false"
             f"&internal_date=gte.{cutoff_ms}"
             f"&order=internal_date.desc&limit={page_size}&offset={offset}",
         )
@@ -387,7 +402,8 @@ def get_persistent_email_by_id(user_id: str, email_id: str) -> dict | None:
     rows = _request(
         "GET",
         "emails?select=id,gmail_message_id,sender,subject,internal_date,gmail_labels,ai_label,ai_label_status"
-        f"&id=eq.{email_filter}&user_id=eq.{user_filter}&deleted=eq.false&limit=1",
+        f"&id=eq.{email_filter}&user_id=eq.{user_filter}"
+        "&deleted=eq.false&hidden_in_app=eq.false&limit=1",
     )
     if not rows:
         return None

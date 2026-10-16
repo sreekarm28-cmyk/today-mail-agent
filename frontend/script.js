@@ -405,7 +405,13 @@ function renderEmail(email) {
   summarize.className = "summarize-button";
   summarize.innerHTML = '<span aria-hidden="true">✳</span> Summarize';
   summarize.addEventListener("click", () => summarizeEmail(email, summarize));
-  footer.append(labels, summarize);
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "remove-email-button";
+  remove.textContent = "Remove";
+  remove.setAttribute("aria-label", `Remove email from app: ${email.subject || "No subject"}`);
+  remove.addEventListener("click", () => hideEmailFromApp(email, remove));
+  footer.append(labels, summarize, remove);
   content.append(openButton, footer);
   card.append(avatar, content);
   card.dataset.renderKey = JSON.stringify([
@@ -491,11 +497,11 @@ async function openEmail(email) {
   }
 }
 
-async function hideEmailFromApp() {
-  if (!selectedEmail) return;
-  const emailToHide = selectedEmail;
-  const button = document.querySelector("#hide-email-button");
-  if (!window.confirm("Remove this email from this app? It will remain in Gmail.")) return;
+async function hideEmailFromApp(email = selectedEmail, button = document.querySelector("#hide-email-button")) {
+  if (!email) return;
+  const emailToHide = email;
+  const originalText = button.textContent;
+  if (!window.confirm(`Remove “${emailToHide.subject || "this email"}” from this app? It will remain in Gmail.`)) return;
 
   button.disabled = true;
   button.textContent = "Removing…";
@@ -504,8 +510,10 @@ async function hideEmailFromApp() {
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.detail || "Could not remove this email.");
     emails = emails.filter((email) => email.id !== emailToHide.id);
-    selectedEmail = null;
-    emailDialog.close();
+    if (selectedEmail?.id === emailToHide.id) {
+      selectedEmail = null;
+      emailDialog.close();
+    }
     renderDashboard();
     syncStatus.hidden = false;
     syncStatus.className = "sync-status";
@@ -514,7 +522,7 @@ async function hideEmailFromApp() {
     showError(error.message || "Could not remove this email.");
   } finally {
     button.disabled = false;
-    button.textContent = "Remove from app";
+    button.textContent = originalText;
   }
 }
 

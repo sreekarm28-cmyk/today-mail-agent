@@ -125,8 +125,8 @@ button:disabled { cursor: wait; opacity: .58; }
 .email-open-button:hover .email-subject { color: #6552ad; }
 .email-subject { margin: 6px 0 4px; overflow-wrap: anywhere; color: #302f36; font: 700 12px Manrope,sans-serif; letter-spacing: -.15px; }
 .email-preview { display: -webkit-box; margin: 0; overflow: hidden; color: #85828b; font-size: 9px; line-height: 1.55; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
-.email-card-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 11px; }
-.email-labels { display: flex; flex-wrap: wrap; gap: 5px; }
+.email-card-footer { display: flex; align-items: center; justify-content: flex-start; flex-wrap: wrap; gap: 7px; margin-top: 11px; }
+.email-labels { display: flex; flex-wrap: wrap; gap: 5px; margin-right: auto; }
 .label-chip { display: inline-flex; align-items: center; min-height: 19px; padding: 0 7px; border-radius: 6px; background: #f0eef4; color: #77727f; font-size: 8px; font-weight: 600; }
 .label-chip.urgent-action { background: #fff0ed; color: #ae4e43; }
 .label-chip.action-needed { background: #fff4e8; color: #a96835; }
@@ -138,6 +138,8 @@ button:disabled { cursor: wait; opacity: .58; }
 .summarize-button { display: inline-flex; align-items: center; gap: 6px; min-height: 27px; padding: 0 9px; border: 1px solid #e5e1ee; border-radius: 8px; background: #fff; color: #6552ad; font-size: 9px; font-weight: 700; transition: background .15s,border .15s; }
 .summarize-button:hover:not(:disabled) { border-color: #d2c9ec; background: #f7f4ff; }
 .summarize-button > span { color: var(--violet); }
+.remove-email-button { min-height: 27px; padding: 0 9px; border: 1px solid #ead6d3; border-radius: 8px; background: #fff; color: #a34e45; font-size: 9px; font-weight: 700; }
+.remove-email-button:hover:not(:disabled) { border-color: #d7b7b2; background: #fff7f5; }
 .button-spinner { width: 11px; height: 11px; border: 1.5px solid #d9d1f4; border-top-color: var(--violet); border-radius: 50%; animation: rotate .7s linear infinite; }
 .inline-message { margin: 12px 0; padding: 11px 13px; border-radius: 9px; font-size: 10px; line-height: 1.5; }
 .inline-message.error { border: 1px solid #f0d3ce; background: #fff4f1; color: #a74e43; }

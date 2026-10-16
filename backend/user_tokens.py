@@ -2,7 +2,7 @@
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from time import perf_counter
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -239,11 +239,17 @@ def upsert_mailbox_email_bodies(user_id: str, bodies: list[dict]) -> None:
     """Save full email text linked to its persistent email row."""
     if not bodies:
         return
-    for offset in range(0, len(bodies), 200):
+    from .email_tool import normalize_email_body
+
+    clean_bodies = [
+        {**row, "body": normalize_email_body(str(row.get("body") or ""))}
+        for row in bodies
+    ]
+    for offset in range(0, len(clean_bodies), 200):
         _request(
             "POST",
             "email_bodies?on_conflict=email_id",
-            bodies[offset : offset + 200],
+            clean_bodies[offset : offset + 200],
             prefer="resolution=merge-duplicates,return=minimal",
         )
 
@@ -267,11 +273,15 @@ def mark_mailbox_emails_deleted(user_id: str, gmail_message_ids: list[str]) -> N
 
 def get_unlabeled_mailbox_emails(user_id: str, limit: int = 100) -> list[dict]:
     """Load saved message text for later classification retries."""
+    from .email_tool import normalize_email_body
+
     user_filter = quote(user_id, safe="")
+    cutoff_ms = int((datetime.now(timezone.utc) - timedelta(hours=24)).timestamp() * 1000)
     rows = _request(
         "GET",
         "emails?select=id,gmail_message_id,sender,subject,snippet,internal_date,gmail_labels,ai_label_status"
         f"&user_id=eq.{user_filter}&ai_label_status=in.(unlabeled,failed)"
+        f"&internal_date=gte.{cutoff_ms}"
         f"&deleted=eq.false&order=internal_date.asc&limit={max(1, min(limit, 500))}",
     )
     body_by_email_id = {}
@@ -285,7 +295,7 @@ def get_unlabeled_mailbox_emails(user_id: str, limit: int = 100) -> list[dict]:
             + "&email_id=in.(" + ",".join(email_ids) + ")&limit=100",
         )
         body_by_email_id.update({
-            row["email_id"]: row.get("body", "")
+            row["email_id"]: normalize_email_body(row.get("body") or "")
             for row in body_rows or []
             if isinstance(row, dict) and row.get("email_id")
         })
@@ -322,16 +332,18 @@ def get_persistent_gmail_ids_since(user_id: str, cutoff_ms: int) -> set[str]:
 
 
 def get_persistent_emails(user_id: str) -> list[dict]:
-    """Read this user's non-deleted email list from the persistent mailbox tables."""
+    """Read this user's non-deleted emails from the most recent rolling 24 hours."""
     rows = []
     offset = 0
     page_size = 500
     user_filter = quote(user_id, safe="")
+    cutoff_ms = int((datetime.now(timezone.utc) - timedelta(hours=24)).timestamp() * 1000)
     while True:
         page = _request(
             "GET",
             "emails?select=id,gmail_message_id,sender,subject,snippet,internal_date,gmail_labels,ai_label,ai_label_status"
             f"&user_id=eq.{user_filter}&deleted=eq.false"
+            f"&internal_date=gte.{cutoff_ms}"
             f"&order=internal_date.desc&limit={page_size}&offset={offset}",
         )
         if not isinstance(page, list):
@@ -368,6 +380,8 @@ def get_persistent_emails(user_id: str) -> list[dict]:
 
 def get_persistent_email_by_id(user_id: str, email_id: str) -> dict | None:
     """Read one email and body, restricted to the owning user."""
+    from .email_tool import normalize_email_body
+
     user_filter = quote(user_id, safe="")
     email_filter = quote(email_id, safe="")
     rows = _request(
@@ -391,7 +405,7 @@ def get_persistent_email_by_id(user_id: str, email_id: str) -> dict | None:
         "from": row.get("sender", ""),
         "subject": row.get("subject", "(No subject)"),
         "received": received.isoformat(timespec="minutes"),
-        "body": body_rows[0].get("body", "") if body_rows else "",
+        "body": normalize_email_body(body_rows[0].get("body") or "") if body_rows else "",
         "labels": row.get("gmail_labels", []),
         "ai_label": row.get("ai_label") if row.get("ai_label_status") == "labeled" else None,
     }

@@ -424,7 +424,7 @@ def process_recent_emails_job(
 
 
 @app.get("/api/dashboard/emails/{email_id}")
-def dashboard_email_details(email_id: str, user: dict | None = Depends(_require_app_user)) -> dict[str, str]:
+def dashboard_email_details(email_id: str, user: dict | None = Depends(_require_app_user)) -> dict:
     """Read one full email body from Supabase, without calling Gmail or the model."""
     if not user:
         raise HTTPException(status_code=401, detail="Sign in to open this email.")

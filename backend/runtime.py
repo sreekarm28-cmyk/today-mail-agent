@@ -231,8 +231,12 @@ def _initial_sync_mailbox(user_id: str, user_email: str = "") -> dict[str, int |
         body_count=len(body_rows),
     )
 
+    dashboard_cutoff_ms = int(
+        (datetime.now(timezone.utc) - timedelta(hours=24)).timestamp() * 1000
+    )
     pending = [
         email for email in emails
+        if int(email["internal_date"]) >= dashboard_cutoff_ms
         if saved_rows.get(email["id"], {}).get("ai_label_status") != "labeled"
     ]
     # The same helper stores the AI category and mirrors it to Gmail.

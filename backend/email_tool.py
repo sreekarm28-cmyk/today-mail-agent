@@ -54,10 +54,21 @@ class _HTMLText(HTMLParser):
             self.text.append(data)
 
     def readable_text(self) -> str:
-        text = "".join(self.text)
-        text = re.sub(r"[\t\f\v ]+", " ", text)
-        text = re.sub(r" *\n *", "\n", text)
-        return re.sub(r"\n{3,}", "\n\n", text).strip()
+        return normalize_email_body("".join(self.text))
+
+
+def normalize_email_body(text: str) -> str:
+    """Normalize plain or HTML-extracted email text while preserving paragraphs."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = text.replace("\xa0", " ").replace("\u200b", "").replace("\ufeff", "")
+    lines = [re.sub(r"\s+", " ", line).strip() for line in text.split("\n")]
+    normalized = []
+    for line in lines:
+        if line:
+            normalized.append(line)
+        elif normalized and normalized[-1] != "":
+            normalized.append("")
+    return "\n".join(normalized).strip()
 
 
 def _decode(value: str | None) -> str:
@@ -81,7 +92,9 @@ def _body(message) -> str:
         if part.get_content_type() == "text/plain":
             payload = part.get_payload(decode=True)
             if payload:
-                return payload.decode(part.get_content_charset() or "utf-8", errors="replace").strip()
+                return normalize_email_body(
+                    payload.decode(part.get_content_charset() or "utf-8", errors="replace")
+                )
         elif part.get_content_type() == "text/html" and html_part is None:
             html_part = part
 

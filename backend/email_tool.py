@@ -58,10 +58,30 @@ class _HTMLText(HTMLParser):
 
 
 def normalize_email_body(text: str) -> str:
-    """Normalize plain or HTML-extracted email text while preserving paragraphs."""
+    """Clean email text, dropping unsubscribe boilerplate but preserving useful links."""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = text.replace("\xa0", " ").replace("\u200b", "").replace("\ufeff", "")
-    lines = [re.sub(r"\s+", " ", line).strip() for line in text.split("\n")]
+    source_lines = text.split("\n")
+    kept_lines = []
+    skip_following_url = False
+    for line in source_lines:
+        cleaned_line = re.sub(r"\s+", " ", line).strip()
+        has_footer_link_text = bool(re.search(
+            r"\b(unsubscribe|opt[ -]?out|manage (?:your )?(?:email )?preferences|email preferences|view (?:this )?email (?:in )?(?:your )?browser)\b",
+            cleaned_line,
+            re.I,
+        ))
+        is_url_only = bool(re.fullmatch(r"[<(\[]*https?://\S+[)>\]]*", cleaned_line, re.I))
+        if has_footer_link_text:
+            skip_following_url = not is_url_only
+            continue
+        if skip_following_url and is_url_only:
+            skip_following_url = False
+            continue
+        skip_following_url = False
+        kept_lines.append(cleaned_line)
+
+    lines = kept_lines
     normalized = []
     for line in lines:
         if line:

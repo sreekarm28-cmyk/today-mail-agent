@@ -3,7 +3,6 @@
 from datetime import datetime, timedelta, timezone
 from email import message_from_bytes
 from email.header import decode_header
-from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 import base64
 import json
@@ -11,7 +10,6 @@ import os
 from pathlib import Path
 import re
 from time import perf_counter
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import keyring
 
@@ -23,7 +21,6 @@ APP_DATA_DIR = Path(os.getenv("LOCALAPPDATA", Path.home() / "AppData" / "Local")
 OAUTH_CLIENT_FILE = APP_DATA_DIR / "credentials.json"
 _CREDENTIAL_SERVICE = "today-mail-agent"
 _TOKEN_KEY_NAME = "GOOGLE_OAUTH_TOKEN"
-GMAIL_BATCH_SIZE = 100
 GMAIL_RAW_BATCH_SIZE = 10
 
 
@@ -209,126 +206,6 @@ def gmail_account_email(credentials) -> str:
     """Return the email address belonging to an OAuth credential set."""
     profile = _gmail_service(credentials=credentials).users().getProfile(userId="me").execute()
     return profile.get("emailAddress", "")
-
-
-def _local_timezone():
-    zone_name = os.getenv("EMAIL_TIMEZONE")
-    try:
-        if not zone_name:
-            return datetime.now().astimezone().tzinfo
-        if zone_name == "Asia/Kolkata":
-            # Windows Python installations may not include the IANA timezone database.
-            return timezone(timedelta(hours=5, minutes=30), name="Asia/Kolkata")
-        return ZoneInfo(zone_name)
-    except ZoneInfoNotFoundError as exc:
-        raise RuntimeError(f"Unknown EMAIL_TIMEZONE: {zone_name}") from exc
-
-
-def _fetch_emails_in_range(start: datetime, end: datetime, user_id: str | None = None) -> list[dict[str, str]]:
-    """Fetch inbox messages in a local-time interval and return their display data."""
-    local_zone = _local_timezone()
-    # Search broadly, then filter using Gmail's exact received timestamp.
-    search_start = (start.astimezone(timezone.utc).date() - timedelta(days=1)).strftime("%Y/%m/%d")
-    limit = max(1, min(int(os.getenv("EMAIL_MAX_RESULTS", "50")), 500))
-    service_started = perf_counter()
-    service = _gmail_service(user_id)
-    log_timing("gmail.client_ready", service_started)
-    list_started = perf_counter()
-    response = service.users().messages().list(
-        userId="me", q=f"in:inbox after:{search_start}", maxResults=limit
-    ).execute()
-    message_ids = response.get("messages", [])
-    log_timing("gmail.message_list", list_started, candidate_count=len(message_ids))
-
-    results = []
-    content_started = perf_counter()
-    for item in message_ids:
-        raw_message = service.users().messages().get(
-            userId="me", id=item["id"], format="raw"
-        ).execute()
-        raw = raw_message.get("raw")
-        if not raw:
-            continue
-        padding = "=" * (-len(raw) % 4)
-        message = message_from_bytes(base64.urlsafe_b64decode(raw + padding))
-
-        internal_ms = raw_message.get("internalDate")
-        received = (
-            datetime.fromtimestamp(int(internal_ms) / 1000, tz=timezone.utc)
-            if internal_ms
-            else parsedate_to_datetime(message.get("Date", "")) if message.get("Date") else None
-        )
-        if received is None:
-            continue
-        if received.tzinfo is None:
-            received = received.replace(tzinfo=local_zone)
-        received = received.astimezone(local_zone)
-        if not start <= received < end:
-            continue
-
-        results.append({
-            "id": item["id"],
-            "from": _decode(message.get("From")),
-            "subject": _decode(message.get("Subject")) or "(No subject)",
-            "received": received.isoformat(timespec="minutes"),
-            "body": _body(message)[:6000],
-            "label_ids": raw_message.get("labelIds", []),
-        })
-
-    log_timing(
-        "gmail.message_content",
-        content_started,
-        requested_count=len(message_ids),
-        returned_count=len(results),
-    )
-    return results
-
-
-def fetch_recent_emails(user_id: str | None = None) -> list[dict[str, str]]:
-    """Fetch inbox messages received in the most recent rolling 24 hours."""
-    now = datetime.now(_local_timezone())
-    return _fetch_emails_in_range(now - timedelta(hours=24), now, user_id)
-
-
-def _fetch_message_metadata_in_batches(service, message_ids: list[dict]) -> dict[str, dict]:
-    """Fetch metadata for many Gmail messages using one HTTP batch per group."""
-    messages_by_id: dict[str, dict] = {}
-    errors: list[Exception] = []
-
-    for offset in range(0, len(message_ids), GMAIL_BATCH_SIZE):
-        batch_items = message_ids[offset : offset + GMAIL_BATCH_SIZE]
-        request_ids = {
-            str(index): item["id"]
-            for index, item in enumerate(batch_items)
-        }
-
-        def on_response(request_id, response, exception):
-            message_id = request_ids[request_id]
-            if exception is not None:
-                errors.append(exception)
-            else:
-                messages_by_id[message_id] = response
-
-        batch = service.new_batch_http_request()
-        for request_id, item in zip(request_ids, batch_items):
-            request = service.users().messages().get(
-                userId="me",
-                id=item["id"],
-                format="metadata",
-                metadataHeaders=["From", "Subject"],
-            )
-            batch.add(request, request_id=request_id, callback=on_response)
-        batch_started = perf_counter()
-        batch.execute()
-        log_timing(
-            "gmail.message_metadata_batch",
-            batch_started,
-            request_count=len(batch_items),
-        )
-
-    if errors:
-        raise errors[0]
-    return messages_by_id
 
 
 def prepare_initial_mailbox_sync(user_id: str, days: int):
@@ -548,102 +425,6 @@ def fetch_gmail_history_changes(service, start_history_id: str) -> dict:
         "history_id": latest_history_id,
         "emails": emails,
         "deleted_ids": sorted(deleted_ids),
-    }
-
-
-def fetch_recent_email_summaries(user_id: str | None = None) -> list[dict[str, str | list[str]]]:
-    """Fetch lightweight inbox metadata for the dashboard, without email bodies."""
-    local_zone = _local_timezone()
-    now = datetime.now(local_zone)
-    start = now - timedelta(hours=24)
-    search_start = (start.astimezone(timezone.utc).date() - timedelta(days=1)).strftime("%Y/%m/%d")
-    limit = max(1, min(int(os.getenv("EMAIL_MAX_RESULTS", "50")), 500))
-    service_started = perf_counter()
-    service = _gmail_service(user_id)
-    log_timing("gmail.client_ready", service_started)
-    list_started = perf_counter()
-    response = service.users().messages().list(
-        userId="me", q=f"in:inbox after:{search_start}", maxResults=limit
-    ).execute()
-    message_ids = response.get("messages", [])
-    log_timing("gmail.message_list", list_started, candidate_count=len(message_ids))
-
-    labels_started = perf_counter()
-    gmail_labels = service.users().labels().list(userId="me").execute().get("labels", [])
-    label_names_by_id = {
-        label["id"]: label["name"]
-        for label in gmail_labels
-        if label.get("type") == "user" and label.get("id") and label.get("name")
-    }
-    log_timing("gmail.labels_list", labels_started, label_count=len(label_names_by_id))
-
-    results: list[dict[str, str | list[str]]] = []
-    metadata_started = perf_counter()
-    messages_by_id = _fetch_message_metadata_in_batches(service, message_ids)
-    for item in message_ids:
-        message = messages_by_id[item["id"]]
-        internal_ms = message.get("internalDate")
-        if not internal_ms:
-            continue
-        received = datetime.fromtimestamp(int(internal_ms) / 1000, tz=timezone.utc).astimezone(local_zone)
-        if not start <= received <= now:
-            continue
-        headers = {
-            header.get("name", "").lower(): header.get("value", "")
-            for header in message.get("payload", {}).get("headers", [])
-        }
-        results.append({
-            "id": item["id"],
-            "from": _decode(headers.get("from")),
-            "subject": _decode(headers.get("subject")) or "(No subject)",
-            "received": received.isoformat(timespec="minutes"),
-            "preview": message.get("snippet", ""),
-            "label_ids": message.get("labelIds", []),
-            "labels": [
-                label_names_by_id[label_id]
-                for label_id in message.get("labelIds", [])
-                if label_id in label_names_by_id
-            ],
-        })
-    log_timing(
-        "gmail.message_metadata",
-        metadata_started,
-        requested_count=len(message_ids),
-        returned_count=len(results),
-        batch_count=(len(message_ids) + GMAIL_BATCH_SIZE - 1) // GMAIL_BATCH_SIZE,
-    )
-    return results
-
-
-def fetch_email_by_id(message_id: str, max_body_chars: int | None = 6000, user_id: str | None = None) -> dict[str, str]:
-    """Fetch one Gmail message by ID, optionally limiting its body for model use."""
-    local_zone = _local_timezone()
-    fetch_started = perf_counter()
-    message_data = _gmail_service(user_id).users().messages().get(
-        userId="me", id=message_id, format="raw"
-    ).execute()
-    raw = message_data.get("raw")
-    if not raw:
-        raise RuntimeError("Gmail did not return the email content.")
-    padding = "=" * (-len(raw) % 4)
-    message = message_from_bytes(base64.urlsafe_b64decode(raw + padding))
-    internal_ms = message_data.get("internalDate")
-    received = datetime.fromtimestamp(int(internal_ms) / 1000, tz=timezone.utc) if internal_ms else None
-    if received is None:
-        raise RuntimeError("Gmail did not return the email's received time.")
-    body = _body(message)
-    if max_body_chars is not None:
-        body = body[:max_body_chars]
-    log_timing("gmail.selected_email_content", fetch_started, body_char_count=len(body))
-    return {
-        "id": message_id,
-        "from": _decode(message.get("From")),
-        "to": _decode(message.get("To")),
-        "cc": _decode(message.get("Cc")),
-        "subject": _decode(message.get("Subject")) or "(No subject)",
-        "received": received.astimezone(local_zone).isoformat(timespec="minutes"),
-        "body": body,
-        "label_ids": message_data.get("labelIds", []),
     }
 
 

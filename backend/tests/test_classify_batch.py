@@ -22,7 +22,6 @@ def test_classify_batch_returns_id_to_category_mapping(monkeypatch):
         }
 
     monkeypatch.setattr(runtime, "chat", fake_chat)
-    monkeypatch.setattr(runtime, "fetch_recent_emails", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Gmail was accessed")))
     monkeypatch.setattr(runtime, "apply_user_label", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Gmail label was applied")))
 
     result = runtime.classify_batch([expected_email])

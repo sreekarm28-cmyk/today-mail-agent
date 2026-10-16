@@ -25,7 +25,7 @@ class UsageLimitTests(unittest.TestCase):
     def test_only_email_summary_endpoint_is_available(self):
         paths = {route.path for route in web.app.routes}
         self.assertNotIn("/api/summarize", paths)
-        self.assertIn("/api/dashboard/emails/{message_id}/summary", paths)
+        self.assertIn("/api/dashboard/emails/{email_id}/summary", paths)
 
     def test_user_can_make_two_email_summaries_per_minute(self):
         user_key = web._rate_limit_key(_request_for_user("user-a"))
@@ -66,7 +66,11 @@ def test_summary_endpoint_allows_two_requests_then_returns_429(monkeypatch):
         return {"id": "endpoint-test-user"}
 
     web.app.dependency_overrides[web._require_app_user] = fake_authenticated_user
-    monkeypatch.setattr(web, "fetch_email_by_id", lambda message_id, user_id=None: {"id": message_id})
+    monkeypatch.setattr(
+        web,
+        "get_persistent_email_by_id",
+        lambda user_id, email_id: {"id": email_id, "body": "An example email."},
+    )
     monkeypatch.setattr(web, "summarize_one_email", lambda email: "A short test summary.")
     try:
         with TestClient(web.app) as client:

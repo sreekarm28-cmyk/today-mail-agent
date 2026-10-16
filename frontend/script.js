@@ -566,7 +566,7 @@ async function summarizeEmail(email, button) {
 connectButton.addEventListener("click", connectGmail);
 document.querySelector("#empty-connect").addEventListener("click", connectGmail);
 document.querySelector("#close-email-dialog").addEventListener("click", () => emailDialog.close());
-document.querySelector("#hide-email-button").addEventListener("click", hideEmailFromApp);
+document.querySelector("#hide-email-button").addEventListener("click", () => hideEmailFromApp());
 emailDialog.addEventListener("click", (event) => {
   if (event.target === emailDialog) emailDialog.close();
 });

@@ -10,7 +10,6 @@ from .email_tool import (
     apply_user_label,
     ensure_user_labels,
     fetch_initial_mailbox_messages,
-    fetch_recent_emails,
     fetch_gmail_history_changes,
     prepare_initial_mailbox_sync,
     prepare_incremental_mailbox_sync,
@@ -470,94 +469,6 @@ def summarize_one_email(email: dict[str, str]) -> str:
             except Exception as exc:
                 record_metadata(span, status="error", error_type=type(exc).__name__)
                 raise
-    finally:
-        flush_client(client)
-
-
-def classify_recent_emails(
-    emails: list[dict] | None = None,
-    user_id: str | None = None,
-) -> dict[str, int | str]:
-    """Classify uncategorized emails with the model, then apply Gmail labels in Python."""
-    client = get_langfuse_client()
-    try:
-        with observation(client, as_type="span", name="classify-recent-emails") as span:
-            # Create only missing category labels before classifying. Existing labels stay as-is.
-            labels_started = perf_counter()
-            labels = ensure_user_labels(CLASSIFICATION_CATEGORIES, user_id)
-            log_timing("classification.labels_ready", labels_started, label_count=len(labels))
-            label_ids = {label["name"]: label["id"] for label in labels}
-
-            if emails is None:
-                emails = fetch_recent_emails(user_id)
-            emails_by_id = {email["id"]: email for email in emails}
-            label_names_by_id = {label["id"]: label["name"] for label in labels}
-            classified_names = set(CLASSIFICATION_CATEGORIES)
-            pending = [
-                email for email in emails
-                if not classified_names.intersection(
-                    label_names_by_id.get(label_id, "")
-                    for label_id in email.get("label_ids", [])
-                )
-            ]
-            already_classified = len(emails) - len(pending)
-            classified = 0
-            failed = 0
-            first_error = ""
-            for offset in range(0, len(pending), CLASSIFICATION_BATCH_SIZE):
-                batch = pending[offset : offset + CLASSIFICATION_BATCH_SIZE]
-                try:
-                    assignment_by_id = classify_batch(batch)
-                    expected_ids = {email["id"] for email in batch}
-                    if set(assignment_by_id) != expected_ids:
-                        raise ValueError("The model did not return one category for every email.")
-
-                    apply_started = perf_counter()
-                    batch_classified = 0
-                    batch_failed = 0
-                    for email_id, category in assignment_by_id.items():
-                        try:
-                            apply_user_label(email_id, label_ids[category], category, user_id)
-                            email_labels = emails_by_id[email_id].setdefault("label_ids", [])
-                            if label_ids[category] not in email_labels:
-                                email_labels.append(label_ids[category])
-                            classified += 1
-                            batch_classified += 1
-                        except Exception as exc:
-                            failed += 1
-                            batch_failed += 1
-                            if not first_error:
-                                first_error = str(exc)
-                    log_timing(
-                        "classification.apply_batch_labels",
-                        apply_started,
-                        email_count=len(batch),
-                        classified_count=batch_classified,
-                        failed_count=batch_failed,
-                    )
-                except Exception as exc:
-                    failed += len(batch)
-                    if not first_error:
-                        first_error = str(exc)
-
-            record_metadata(
-                span,
-                status="success" if not failed else "partial",
-                email_count=len(emails),
-                classified_count=classified,
-                already_classified_count=already_classified,
-                failed_count=failed,
-            )
-            return {
-                "classified": classified,
-                "already_classified": already_classified,
-                "failed": failed,
-                "message": first_error,
-            }
-    except Exception as exc:
-        if 'span' in locals():
-            record_metadata(span, status="error", error_type=type(exc).__name__)
-        raise
     finally:
         flush_client(client)
 

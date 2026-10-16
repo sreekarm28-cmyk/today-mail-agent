@@ -1,11 +1,11 @@
-"""Tests for avoiding repeated dashboard Gmail syncs."""
+"""Tests for dashboard synchronization through the persistent mailbox."""
 
 from uuid import uuid4
 
 from backend import web
 
 
-def test_recent_sync_reuses_cache_instead_of_fetching_gmail(monkeypatch):
+def test_dashboard_sync_returns_saved_database_emails(monkeypatch):
     user_id = str(uuid4())
     emails = [{
         "id": "mail-1",
@@ -15,32 +15,17 @@ def test_recent_sync_reuses_cache_instead_of_fetching_gmail(monkeypatch):
         "preview": "A short preview",
         "labels": ["Updates"],
     }]
-    cache = []
-    fetch_calls = []
+    sync_calls = []
 
-    def fake_fetch(request_user_id):
-        fetch_calls.append(request_user_id)
-        return emails
+    def fake_sync(request_user_id, user_email):
+        sync_calls.append((request_user_id, user_email))
+        return {"status": "success"}
 
-    monkeypatch.setattr(web, "fetch_recent_email_summaries", fake_fetch)
-    monkeypatch.setattr(web, "_to_dashboard_items", lambda fetched: fetched)
-    monkeypatch.setattr(web, "delete_expired_email_cache", lambda cutoff, request_user_id: None)
-    monkeypatch.setattr(
-        web,
-        "replace_recent_email_cache",
-        lambda request_user_id, rows: cache.__setitem__(slice(None), rows),
-    )
-    monkeypatch.setattr(web, "get_recent_email_cache", lambda request_user_id, cutoff: list(cache))
-    web._dashboard_sync_last_success.pop(user_id, None)
+    monkeypatch.setattr(web, "sync_persistent_mailbox", fake_sync)
+    monkeypatch.setattr(web, "get_persistent_emails", lambda request_user_id: emails)
 
-    try:
-        first = web.sync_dashboard_emails({"id": user_id})
-        second = web.sync_dashboard_emails({"id": user_id})
+    result = web.sync_dashboard_emails({"id": user_id, "email": "person@example.com"})
 
-        assert len(fetch_calls) == 1
-        assert first["sync_status"] == "updated"
-        assert second["sync_status"] == "reused"
-        assert second["emails"] == emails
-    finally:
-        web._dashboard_sync_last_success.pop(user_id, None)
-        web._dashboard_sync_locks.pop(user_id, None)
+    assert sync_calls == [(user_id, "person@example.com")]
+    assert result["sync_status"] == "success"
+    assert result["emails"] == emails

@@ -154,23 +154,33 @@ def classify_batch(
         raise ValueError("The model returned invalid category assignments.") from exc
     assignments = arguments.get("assignments") if isinstance(arguments, dict) else None
     expected_ids = {email["id"] for email in emails}
-    if not isinstance(assignments, list) or len(assignments) != len(emails):
-        raise ValueError("The model did not classify every email in this batch.")
+    if not isinstance(assignments, list):
+        raise ValueError("The model returned an invalid assignments list.")
 
     categories_by_id = {}
+    invalid_ids = set()
     for assignment in assignments:
         if not isinstance(assignment, dict):
-            raise ValueError("A category assignment was not a valid object.")
+            continue
         email_id = assignment.get("email_id")
         category = assignment.get("category")
-        if email_id not in expected_ids or email_id in categories_by_id:
-            raise ValueError("A category assignment used an unexpected or repeated email ID.")
+        if not isinstance(email_id, str) or email_id not in expected_ids:
+            continue
+        if email_id in categories_by_id or email_id in invalid_ids:
+            categories_by_id.pop(email_id, None)
+            invalid_ids.add(email_id)
+            continue
         if category not in CLASSIFICATION_CATEGORIES:
-            raise ValueError("A category assignment used an unknown category.")
+            invalid_ids.add(email_id)
+            continue
         categories_by_id[email_id] = category
-    if set(categories_by_id) != expected_ids:
-        raise ValueError("The model did not return one category for every email.")
-    log_timing("classification.validate_batch", validation_started, email_count=len(emails))
+    log_timing(
+        "classification.validate_batch",
+        validation_started,
+        email_count=len(emails),
+        assigned_count=len(categories_by_id),
+        missing_count=len(expected_ids - set(categories_by_id)),
+    )
     return categories_by_id
 
 
@@ -315,7 +325,20 @@ def _classify_persistent_emails(
                 user_id, connection_id, [email["id"] for email in batch]
             )
             assignments = classify_batch(batch)
-            saved = upsert_mailbox_emails(user_id, connection_id, batch, assignments)
+            assigned_emails = [email for email in batch if email["id"] in assignments]
+            saved = (
+                upsert_mailbox_emails(user_id, connection_id, assigned_emails, assignments)
+                if assigned_emails
+                else {}
+            )
+            missing_count = len(batch) - len(assigned_emails)
+            failed += missing_count
+            if missing_count:
+                logger.warning(
+                    "Model returned valid labels for %s of %s emails in a batch; the rest remain retryable.",
+                    len(assigned_emails),
+                    len(batch),
+                )
             for email_id, category in assignments.items():
                 try:
                     apply_user_label(email_id, label_ids[category], category, user_id, connection_id)

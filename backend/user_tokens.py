@@ -349,15 +349,25 @@ def get_unlabeled_mailbox_emails(user_id: str, connection_id: str, limit: int = 
     user_filter = quote(user_id, safe="")
     connection_filter = quote(connection_id, safe="")
     cutoff_ms = int((datetime.now(timezone.utc) - timedelta(hours=24)).timestamp() * 1000)
-    rows = _request(
-        "GET",
-        "emails?select=id,gmail_message_id,sender,subject,snippet,internal_date,gmail_labels,ai_label_status,classification_attempted_at"
-        f"&user_id=eq.{user_filter}&connection_id=eq.{connection_filter}"
-        "&ai_label_status=in.(unlabeled,failed)"
-        f"&internal_date=gte.{cutoff_ms}"
-        f"&deleted=eq.false&hidden_in_app=eq.false"
-        f"&order=internal_date.asc&limit={max(1, min(limit, 500))}",
-    )
+    page_size = max(1, min(limit, 500))
+    rows = []
+    offset = 0
+    while True:
+        page = _request(
+            "GET",
+            "emails?select=id,gmail_message_id,sender,subject,snippet,internal_date,gmail_labels,ai_label_status,classification_attempted_at"
+            f"&user_id=eq.{user_filter}&connection_id=eq.{connection_filter}"
+            "&ai_label_status=in.(unlabeled,failed)"
+            f"&internal_date=gte.{cutoff_ms}"
+            f"&deleted=eq.false&hidden_in_app=eq.false"
+            f"&order=internal_date.asc,id.asc&limit={page_size}&offset={offset}",
+        )
+        if not isinstance(page, list):
+            raise RuntimeError("Supabase returned an invalid unlabeled email list.")
+        rows.extend(page)
+        if len(page) < page_size:
+            break
+        offset += len(page)
     retry_before = datetime.now(timezone.utc) - timedelta(minutes=15)
     rows = [
         row for row in rows or []

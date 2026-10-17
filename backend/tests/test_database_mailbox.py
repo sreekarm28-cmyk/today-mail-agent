@@ -167,3 +167,33 @@ def test_disconnect_deletes_only_the_owned_connection_without_selecting_tokens(m
     assert "select=id" in path
     assert "refresh_token_ciphertext" not in path
     assert prefer == "return=representation"
+
+
+def test_unlabeled_email_loader_reads_all_pages(monkeypatch):
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    rows = [
+        {
+            "id": f"db-{index}",
+            "gmail_message_id": f"gmail-{index}",
+            "internal_date": now_ms,
+            "ai_label_status": "unlabeled",
+        }
+        for index in range(501)
+    ]
+    list_offsets = []
+
+    def fake_request(method, path, payload=None, prefer=None):
+        if path.startswith("emails?"):
+            offset = int(path.rsplit("&offset=", 1)[1])
+            list_offsets.append(offset)
+            return rows[offset : offset + 500]
+        return []
+
+    monkeypatch.setattr(user_tokens, "_request", fake_request)
+
+    result = user_tokens.get_unlabeled_mailbox_emails(
+        "user-1", "connection-1", limit=500
+    )
+
+    assert len(result) == 501
+    assert list_offsets == [0, 500]

@@ -592,7 +592,7 @@ function renderEmail(email) {
   card.append(avatar, content);
   card.dataset.renderKey = JSON.stringify([
     email.from, email.subject, email.received, email.preview, email.labels,
-    email.connection_id, email.account_email,
+    email.connection_id, email.account_email, activeAccountFilter === "all",
   ]);
   return card;
 }
@@ -622,7 +622,7 @@ function renderDashboard() {
   const nextCards = shown.map((email) => {
     const renderKey = JSON.stringify([
       email.from, email.subject, email.received, email.preview, email.labels,
-      email.connection_id, email.account_email,
+      email.connection_id, email.account_email, activeAccountFilter === "all",
     ]);
     const existing = existingCards.get(email.id);
     if (existing?.dataset.renderKey === renderKey) return existing;

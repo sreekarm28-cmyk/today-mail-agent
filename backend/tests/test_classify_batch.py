@@ -36,6 +36,27 @@ def test_classify_batch_returns_id_to_category_mapping(monkeypatch):
     assert sent_payload["emails"][0]["id"] == "mail-1"
 
 
+def test_classify_batch_sends_up_to_4000_body_characters(monkeypatch):
+    captured = {}
+
+    def fake_chat(messages, tools, **kwargs):
+        captured["payload"] = json.loads(messages[1]["content"])
+        return {
+            "tool_calls": [{
+                "function": {
+                    "name": "return_email_categories",
+                    "arguments": json.dumps({"assignments": []}),
+                }
+            }]
+        }
+
+    monkeypatch.setattr(runtime, "chat", fake_chat)
+
+    runtime.classify_batch([{"id": "mail-1", "body": "x" * 5000}])
+
+    assert len(captured["payload"]["emails"][0]["body"]) == 4000
+
+
 def test_classify_batch_ignores_an_unknown_category_for_that_email(monkeypatch):
     def fake_chat(*args, **kwargs):
         return {
@@ -113,6 +134,107 @@ def test_runtime_saves_and_applies_only_the_assignments_returned(monkeypatch):
     assert saved_batches == [["mail-1"]]
     assert applied == ["mail-1"]
     assert (classified, failed) == (1, 2)
+
+
+def test_partial_batch_does_not_discard_valid_emails_or_stop_later_batches(monkeypatch):
+    emails = [{"id": f"mail-{index}"} for index in range(1, 6)]
+    attempted_batches = []
+    model_batches = []
+    saved_batches = []
+    applied = []
+    labels = [
+        {"name": category, "id": f"label-{index}"}
+        for index, category in enumerate(runtime.CLASSIFICATION_CATEGORIES)
+    ]
+
+    monkeypatch.setattr(runtime, "ensure_user_labels", lambda *args: labels)
+    monkeypatch.setattr(
+        runtime,
+        "mark_mailbox_classification_attempted",
+        lambda user_id, connection_id, ids: attempted_batches.append(list(ids)),
+    )
+
+    def fake_classify(batch):
+        ids = [email["id"] for email in batch]
+        model_batches.append(ids)
+        if ids == ["mail-1", "mail-2", "mail-3"]:
+            # The model omitted two emails, but mail-1's valid result must be kept.
+            return {"mail-1": "Updates"}
+        return {email_id: "Important Info" for email_id in ids}
+
+    monkeypatch.setattr(runtime, "classify_batch", fake_classify)
+
+    def fake_upsert(user_id, connection_id, batch, assignments):
+        ids = [email["id"] for email in batch]
+        saved_batches.append(ids)
+        return {email_id: {"id": f"db-{email_id}"} for email_id in ids}
+
+    monkeypatch.setattr(runtime, "upsert_mailbox_emails", fake_upsert)
+    monkeypatch.setattr(
+        runtime,
+        "apply_user_label",
+        lambda email_id, *args: applied.append(email_id),
+    )
+    monkeypatch.setattr(runtime, "update_mailbox_email", lambda *args: None)
+
+    classified, failed = runtime._classify_persistent_emails(
+        "user-1", "connection-1", emails
+    )
+
+    assert model_batches == [
+        ["mail-1", "mail-2", "mail-3"],
+        ["mail-4", "mail-5"],
+    ]
+    assert attempted_batches == model_batches
+    assert saved_batches == [["mail-1"], ["mail-4", "mail-5"]]
+    assert applied == ["mail-1", "mail-4", "mail-5"]
+    assert (classified, failed) == (3, 2)
+
+
+def test_model_error_in_one_batch_does_not_stop_later_batches(monkeypatch):
+    emails = [{"id": f"mail-{index}"} for index in range(1, 6)]
+    model_calls = []
+    applied = []
+    labels = [
+        {"name": category, "id": f"label-{index}"}
+        for index, category in enumerate(runtime.CLASSIFICATION_CATEGORIES)
+    ]
+
+    monkeypatch.setattr(runtime, "ensure_user_labels", lambda *args: labels)
+    monkeypatch.setattr(runtime, "mark_mailbox_classification_attempted", lambda *args: None)
+
+    def fake_classify(batch):
+        ids = [email["id"] for email in batch]
+        model_calls.append(ids)
+        if ids[0] == "mail-1":
+            raise RuntimeError("simulated model error")
+        return {email_id: "Updates" for email_id in ids}
+
+    monkeypatch.setattr(runtime, "classify_batch", fake_classify)
+    monkeypatch.setattr(
+        runtime,
+        "upsert_mailbox_emails",
+        lambda user_id, connection_id, batch, assignments: {
+            email["id"]: {"id": f"db-{email['id']}"} for email in batch
+        },
+    )
+    monkeypatch.setattr(
+        runtime,
+        "apply_user_label",
+        lambda email_id, *args: applied.append(email_id),
+    )
+    monkeypatch.setattr(runtime, "update_mailbox_email", lambda *args: None)
+
+    classified, failed = runtime._classify_persistent_emails(
+        "user-1", "connection-1", emails
+    )
+
+    assert model_calls == [
+        ["mail-1", "mail-2", "mail-3"],
+        ["mail-4", "mail-5"],
+    ]
+    assert applied == ["mail-4", "mail-5"]
+    assert (classified, failed) == (2, 3)
 
 
 def test_gmail_label_failure_keeps_email_retryable(monkeypatch):

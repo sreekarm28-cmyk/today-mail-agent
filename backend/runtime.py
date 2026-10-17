@@ -67,8 +67,9 @@ CLASSIFICATION_TOOL = {
 }
 
 CLASSIFICATION_CATEGORIES = ["Urgent Action", "Action Needed", "Important Info", "Updates", "Promotions"]
-CLASSIFICATION_BATCH_SIZE = 3
 CLASSIFICATION_BODY_MAX_CHARS = 2000
+CLASSIFICATION_OUTPUT_TOKENS_PER_EMAIL = 48
+CLASSIFICATION_MAX_OUTPUT_TOKENS = 8192
 
 CLASSIFICATION_PROMPTS = {
     "baseline": (
@@ -145,6 +146,10 @@ def classify_batch(
             "type": "function",
             "function": {"name": "return_email_categories"},
         },
+        max_tokens=min(
+            CLASSIFICATION_MAX_OUTPUT_TOKENS,
+            max(1024, len(emails) * CLASSIFICATION_OUTPUT_TOKENS_PER_EMAIL),
+        ),
     )
     log_timing("classification.model_batch", model_started, email_count=len(emails))
     validation_started = perf_counter()
@@ -315,74 +320,71 @@ def initial_sync_mailbox(
 def _classify_persistent_emails(
     user_id: str, connection_id: str, emails: list[dict]
 ) -> tuple[int, int]:
-    """Classify saved email bodies, persist categories, and mirror labels to Gmail."""
+    """Classify all eligible saved emails together, persist categories, and label Gmail."""
     if not emails:
         return 0, 0
     label_rows = ensure_user_labels(CLASSIFICATION_CATEGORIES, user_id, connection_id)
     label_ids = {label["name"]: label["id"] for label in label_rows}
     classified = failed = 0
-    for offset in range(0, len(emails), CLASSIFICATION_BATCH_SIZE):
-        batch = emails[offset : offset + CLASSIFICATION_BATCH_SIZE]
-        try:
-            mark_mailbox_classification_attempted(
-                user_id, connection_id, [email["id"] for email in batch]
+    try:
+        mark_mailbox_classification_attempted(
+            user_id, connection_id, [email["id"] for email in emails]
+        )
+        assignments = classify_batch(emails)
+        assigned_emails = [email for email in emails if email["id"] in assignments]
+        saved = (
+            upsert_mailbox_emails(user_id, connection_id, assigned_emails, assignments)
+            if assigned_emails
+            else {}
+        )
+        missing_count = len(emails) - len(assigned_emails)
+        failed += missing_count
+        if missing_count:
+            logger.warning(
+                "Model returned valid labels for %s of %s emails; the rest remain retryable.",
+                len(assigned_emails),
+                len(emails),
             )
-            assignments = classify_batch(batch)
-            assigned_emails = [email for email in batch if email["id"] in assignments]
-            saved = (
-                upsert_mailbox_emails(user_id, connection_id, assigned_emails, assignments)
-                if assigned_emails
-                else {}
-            )
-            missing_count = len(batch) - len(assigned_emails)
-            failed += missing_count
-            if missing_count:
-                logger.warning(
-                    "Model returned valid labels for %s of %s emails in a batch; the rest remain retryable.",
-                    len(assigned_emails),
-                    len(batch),
-                )
-            for email_id, category in assignments.items():
-                try:
-                    apply_user_label(email_id, label_ids[category], category, user_id, connection_id)
-                    row = saved.get(email_id)
-                    if row:
-                        existing_labels = next(
-                            (email.get("gmail_labels", []) for email in batch if email["id"] == email_id),
-                            [],
-                        )
-                        if category not in existing_labels:
-                            existing_labels.append(category)
-                        update_mailbox_email(
-                            user_id,
-                            connection_id,
-                            email_id,
-                            {"gmail_labels": existing_labels, "deleted": False},
-                        )
-                    classified += 1
-                except Exception as exc:
-                    failed += 1
-                    # The AI category is useful for retrying, but do not show
-                    # the message as successfully labeled until Gmail accepted it.
+        for email_id, category in assignments.items():
+            try:
+                apply_user_label(email_id, label_ids[category], category, user_id, connection_id)
+                row = saved.get(email_id)
+                if row:
+                    existing_labels = next(
+                        (email.get("gmail_labels", []) for email in emails if email["id"] == email_id),
+                        [],
+                    )
+                    if category not in existing_labels:
+                        existing_labels.append(category)
                     update_mailbox_email(
                         user_id,
                         connection_id,
                         email_id,
-                        {
-                            "ai_label_status": "failed",
-                            "classification_attempted_at": datetime.now(timezone.utc).isoformat(),
-                        },
+                        {"gmail_labels": existing_labels, "deleted": False},
                     )
-                    logger.warning(
-                        "Could not apply a Gmail label (%s); saved email remains retryable.",
-                        type(exc).__name__,
-                    )
-        except Exception as exc:
-            failed += len(batch)
-            logger.warning(
-                "Persistent email classification failed (%s); emails remain unlabeled.",
-                type(exc).__name__,
-            )
+                classified += 1
+            except Exception as exc:
+                failed += 1
+                # Keep the AI category retryable until Gmail accepts the label.
+                update_mailbox_email(
+                    user_id,
+                    connection_id,
+                    email_id,
+                    {
+                        "ai_label_status": "failed",
+                        "classification_attempted_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                )
+                logger.warning(
+                    "Could not apply a Gmail label (%s); saved email remains retryable.",
+                    type(exc).__name__,
+                )
+    except Exception as exc:
+        failed += len(emails)
+        logger.warning(
+            "Persistent email classification failed (%s); emails remain unlabeled.",
+            type(exc).__name__,
+        )
     return classified, failed
 
 

@@ -28,6 +28,10 @@ def test_classify_batch_returns_id_to_category_mapping(monkeypatch):
 
     assert result == {"mail-1": "Urgent Action"}
     assert captured["tools"][0]["function"]["name"] == "return_email_categories"
+    system_prompt = captured["messages"][0]["content"]
+    assert "NEVER abstain" in system_prompt
+    assert "Complete coverage is more important" in system_prompt
+    assert "If the email is ambiguous, still choose the closest category" in system_prompt
     sent_payload = json.loads(captured["messages"][1]["content"])
     assert sent_payload["emails"][0]["id"] == "mail-1"
 

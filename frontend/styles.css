@@ -101,6 +101,14 @@ button:disabled { cursor: wait; opacity: .58; }
 .section-heading h2 { margin: 0; font: 700 19px Manrope,sans-serif; letter-spacing: -.55px; }
 .sort-note { display: flex; align-items: center; gap: 7px; padding-bottom: 3px; color: #8a8791; font-size: 9px; }
 .sort-dot { width: 5px; height: 5px; flex-basis: 5px; background: var(--violet); }
+.account-filters { display: flex; gap: 7px; margin: 15px 0 0; overflow-x: auto; padding: 1px 0 5px; scrollbar-width: thin; }
+.account-filter { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 7px; min-height: 34px; padding: 0 12px; border: 1px solid #e3e1e5; border-radius: 999px; background: #ffffff96; color: #6f6c77; font-size: 10px; font-weight: 650; transition: all .15s; }
+.account-filter:hover { border-color: #d4cee5; background: #fff; }
+.account-filter.active { border-color: #cfc5f3; background: #eeeaff; color: #51408f; }
+.account-filter-dot { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: #a59daf; }
+.account-filter.active .account-filter-dot { background: #7562c4; }
+.account-filter.all-accounts .account-filter-dot { background: #7b9a87; }
+.account-tag { display: inline-flex; max-width: 210px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 3px 7px; border: 1px solid #e4e0eb; border-radius: 999px; background: #f7f5fb; color: #686078; font-size: 9px; font-weight: 600; }
 .filter-tabs { display: flex; gap: 6px; margin: 17px 0 11px; overflow-x: auto; padding: 0 0 4px; scrollbar-width: thin; }
 .filter-tab { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 7px; min-height: 32px; padding: 0 10px; border: 1px solid #e3e1e5; border-radius: 9px; background: #ffffff96; color: #6f6c77; font-size: 9px; font-weight: 600; transition: all .15s; }
 .filter-tab:hover { border-color: #d4cee5; background: #fff; }
@@ -202,6 +210,7 @@ button:disabled { cursor: wait; opacity: .58; }
   .summary-decoration { right: -45px; opacity: .45; }
   .section-heading { margin-top: 27px; }
   .section-heading h2 { font-size: 17px; }
+  .account-filters { margin-top: 12px; }
   .filter-tabs { margin-top: 13px; }
   .email-card { grid-template-columns: 29px minmax(0,1fr); gap: 9px; padding: 12px 11px 11px; }
   .sender-avatar { width: 29px; height: 29px; border-radius: 9px; font-size: 9px; }

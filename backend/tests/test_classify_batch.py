@@ -51,3 +51,35 @@ def test_classify_batch_rejects_unknown_category(monkeypatch):
         assert "unknown category" in str(exc)
     else:
         raise AssertionError("Unknown category should be rejected")
+
+
+def test_gmail_label_failure_keeps_email_retryable(monkeypatch):
+    updates = []
+    email = {"id": "mail-1", "subject": "Pay by noon", "body": "Please pay by noon."}
+
+    monkeypatch.setattr(runtime, "ensure_user_labels", lambda *args: [{"name": "Urgent Action", "id": "label-1"}])
+    monkeypatch.setattr(runtime, "mark_mailbox_classification_attempted", lambda *args: None)
+    monkeypatch.setattr(runtime, "classify_batch", lambda _emails: {"mail-1": "Urgent Action"})
+    monkeypatch.setattr(
+        runtime,
+        "upsert_mailbox_emails",
+        lambda *args: {"mail-1": {"id": "db-mail-1"}},
+    )
+    monkeypatch.setattr(
+        runtime,
+        "apply_user_label",
+        lambda *args: (_ for _ in ()).throw(RuntimeError("Gmail unavailable")),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "update_mailbox_email",
+        lambda user_id, connection_id, gmail_id, values: updates.append(
+            (user_id, connection_id, gmail_id, values)
+        ),
+    )
+
+    classified, failed = runtime._classify_persistent_emails("user-1", "connection-1", [email])
+
+    assert (classified, failed) == (0, 1)
+    assert updates[0][:3] == ("user-1", "connection-1", "mail-1")
+    assert updates[0][3]["ai_label_status"] == "failed"

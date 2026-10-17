@@ -13,6 +13,10 @@ from cryptography.fernet import Fernet, InvalidToken
 from .diagnostics import log_timing
 
 
+class GmailAccountLimitError(RuntimeError):
+    """Raised when an app user already has the maximum connected inboxes."""
+
+
 def _settings() -> tuple[str, str]:
     project_url = os.getenv("SUPABASE_URL", "").rstrip("/")
     secret_key = os.getenv("SUPABASE_SECRET_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
@@ -69,28 +73,46 @@ def _request(method: str, path: str, payload: dict | list | None = None, prefer:
             resource=path.split("?", 1)[0],
             error_type=type(exc).__name__,
         )
+        if isinstance(exc, HTTPError):
+            detail = exc.read().decode("utf-8", errors="replace")
+            if "GMAIL_ACCOUNT_LIMIT" in detail:
+                raise GmailAccountLimitError(
+                    "You can connect up to two Gmail accounts."
+                ) from exc
         raise RuntimeError("Could not safely access Supabase data.") from exc
 
 
-def save_gmail_connection(user_id: str, email: str, refresh_token: str) -> None:
+def save_gmail_connection(user_id: str, email: str, refresh_token: str) -> dict:
     encrypted_token = _fernet().encrypt(refresh_token.encode("utf-8")).decode("ascii")
-    path = "gmail_connections?on_conflict=user_id"
-    _request(
+    rows = _request(
         "POST",
-        path,
+        "rpc/save_gmail_connection",
         {
-            "user_id": user_id,
-            "gmail_email": email,
-            "refresh_token_ciphertext": encrypted_token,
+            "p_user_id": user_id,
+            "p_gmail_email": email,
+            "p_refresh_token_ciphertext": encrypted_token,
         },
-        prefer="resolution=merge-duplicates,return=minimal",
     )
+    if not isinstance(rows, list) or not rows:
+        raise RuntimeError("Supabase did not return the saved Gmail connection.")
+    return rows[0]
 
 
-def get_gmail_connection(user_id: str) -> dict | None:
+def list_user_gmail_connections(user_id: str) -> list[dict]:
+    rows = _request(
+        "GET",
+        "gmail_connections?select=id,user_id,gmail_email,connected_at&user_id=eq."
+        f"{quote(user_id, safe='')}&order=connected_at.asc&limit=2",
+    )
+    if not isinstance(rows, list):
+        raise RuntimeError("Supabase returned an invalid Gmail connection list.")
+    return rows
+
+
+def get_gmail_connection(user_id: str, connection_id: str) -> dict | None:
     path = (
-        "gmail_connections?select=gmail_email,refresh_token_ciphertext&user_id=eq."
-        f"{quote(user_id, safe='')}&limit=1"
+        "gmail_connections?select=id,user_id,gmail_email,refresh_token_ciphertext&user_id=eq."
+        f"{quote(user_id, safe='')}&id=eq.{quote(connection_id, safe='')}&limit=1"
     )
     rows = _request("GET", path)
     if not rows:
@@ -103,63 +125,62 @@ def get_gmail_connection(user_id: str) -> dict | None:
         log_timing("gmail.refresh_token_decrypt", decrypt_started, status="error")
         raise RuntimeError("The saved Gmail connection could not be unlocked. Contact the app owner.") from exc
     log_timing("gmail.refresh_token_decrypt", decrypt_started)
-    return {"email": row["gmail_email"], "refresh_token": refresh_token}
-
-
-def save_persistent_user_tokens(
-    user_id: str,
-    email: str,
-    access_token: str | None,
-    refresh_token: str,
-    token_expiry: str | None,
-) -> None:
-    """Store OAuth tokens encrypted in the new mailbox users table."""
-    cipher = _fernet()
-    payload = {
-        "user_id": user_id,
-        "email": email,
-        "access_token": cipher.encrypt((access_token or "").encode("utf-8")).decode("ascii"),
-        "refresh_token": cipher.encrypt(refresh_token.encode("utf-8")).decode("ascii"),
-        "token_expiry": token_expiry,
+    return {
+        "id": row["id"],
+        "user_id": row["user_id"],
+        "email": row["gmail_email"],
+        "refresh_token": refresh_token,
     }
-    _request(
-        "POST",
-        "users?on_conflict=user_id",
-        payload,
-        prefer="resolution=merge-duplicates,return=minimal",
+
+
+def get_gmail_connection_by_email(user_id: str, email: str) -> dict | None:
+    rows = _request(
+        "GET",
+        "gmail_connections?select=id,user_id,gmail_email,refresh_token_ciphertext"
+        f"&user_id=eq.{quote(user_id, safe='')}&gmail_email=eq.{quote(email, safe='')}&limit=1",
     )
+    if not rows:
+        return None
+    row = rows[0]
+    try:
+        token = _fernet().decrypt(row["refresh_token_ciphertext"].encode("ascii")).decode("utf-8")
+    except (InvalidToken, KeyError, UnicodeEncodeError) as exc:
+        raise RuntimeError("The saved Gmail connection could not be unlocked.") from exc
+    return {"id": row["id"], "user_id": row["user_id"], "email": row["gmail_email"], "refresh_token": token}
 
 
-def get_mailbox_sync_state(user_id: str) -> dict | None:
+def get_mailbox_sync_state(user_id: str, connection_id: str) -> dict | None:
     rows = _request(
         "GET",
         "sync_state?select=last_history_id,last_internal_date,initial_sync_complete,is_syncing,sync_started_at,last_synced_at"
-        f"&user_id=eq.{quote(user_id, safe='')}&limit=1",
+        f"&user_id=eq.{quote(user_id, safe='')}&connection_id=eq.{quote(connection_id, safe='')}&limit=1",
     )
     return rows[0] if rows else None
 
 
-def save_mailbox_sync_state(user_id: str, values: dict) -> None:
+def save_mailbox_sync_state(user_id: str, connection_id: str, values: dict) -> None:
     _request(
         "POST",
-        "sync_state?on_conflict=user_id",
-        {"user_id": user_id, **values},
+        "sync_state?on_conflict=connection_id",
+        {"user_id": user_id, "connection_id": connection_id, **values},
         prefer="resolution=merge-duplicates,return=minimal",
     )
 
 
-def acquire_mailbox_sync_lock(user_id: str, stale_before: str) -> bool:
-    """Atomically claim this user's sync row; reclaim only an old stuck lock."""
+def acquire_mailbox_sync_lock(user_id: str, connection_id: str, stale_before: str) -> bool:
+    """Atomically claim this mailbox's sync row; reclaim only an old stuck lock."""
     user_filter = quote(user_id, safe="")
+    connection_filter = quote(connection_id, safe="")
     _request(
         "POST",
-        "sync_state?on_conflict=user_id",
-        {"user_id": user_id},
+        "sync_state?on_conflict=connection_id",
+        {"user_id": user_id, "connection_id": connection_id},
         prefer="resolution=ignore-duplicates,return=minimal",
     )
     rows = _request(
         "PATCH",
         "sync_state?user_id=eq." + user_filter
+        + "&connection_id=eq." + connection_filter
         + "&or=(is_syncing.eq.false,sync_started_at.lt." + quote(stale_before, safe="") + ")"
         + "&select=user_id",
         {"is_syncing": True, "sync_started_at": datetime.now(timezone.utc).isoformat()},
@@ -168,11 +189,12 @@ def acquire_mailbox_sync_lock(user_id: str, stale_before: str) -> bool:
     return isinstance(rows, list) and bool(rows)
 
 
-def release_mailbox_sync_lock(user_id: str, synced_at: str | None = None) -> None:
+def release_mailbox_sync_lock(user_id: str, connection_id: str, synced_at: str | None = None) -> None:
     """Release a user's sync lock even when Gmail or model work failed."""
     _request(
         "PATCH",
-        "sync_state?user_id=eq." + quote(user_id, safe=""),
+        "sync_state?user_id=eq." + quote(user_id, safe="")
+        + "&connection_id=eq." + quote(connection_id, safe=""),
         {
             "is_syncing": False,
             "sync_started_at": None,
@@ -182,11 +204,12 @@ def release_mailbox_sync_lock(user_id: str, synced_at: str | None = None) -> Non
     )
 
 
-def update_mailbox_sync_state(user_id: str, values: dict) -> None:
-    """Update only an existing user's sync cursor and timestamps."""
+def update_mailbox_sync_state(user_id: str, connection_id: str, values: dict) -> None:
+    """Update only an existing mailbox's sync cursor and timestamps."""
     _request(
         "PATCH",
-        "sync_state?user_id=eq." + quote(user_id, safe=""),
+        "sync_state?user_id=eq." + quote(user_id, safe="")
+        + "&connection_id=eq." + quote(connection_id, safe=""),
         values,
         prefer="return=minimal",
     )
@@ -194,6 +217,7 @@ def update_mailbox_sync_state(user_id: str, values: dict) -> None:
 
 def upsert_mailbox_emails(
     user_id: str,
+    connection_id: str,
     emails: list[dict],
     classifications: dict[str, str] | None = None,
 ) -> dict[str, dict]:
@@ -204,6 +228,7 @@ def upsert_mailbox_emails(
     for email in emails:
         row = {
             "user_id": user_id,
+            "connection_id": connection_id,
             "gmail_message_id": email["id"],
             "thread_id": email.get("thread_id", ""),
             "sender": email.get("from", ""),
@@ -217,13 +242,14 @@ def upsert_mailbox_emails(
             category = classifications.get(email["id"])
             row["ai_label"] = category
             row["ai_label_status"] = "labeled" if category else "unlabeled"
+            row["classification_attempted_at"] = datetime.now(timezone.utc).isoformat()
         rows.append(row)
 
     result_by_gmail_id = {}
     for offset in range(0, len(rows), 200):
         result = _request(
             "POST",
-            "emails?on_conflict=user_id,gmail_message_id"
+            "emails?on_conflict=connection_id,gmail_message_id"
             "&select=id,gmail_message_id,ai_label,ai_label_status",
             rows[offset : offset + 200],
             prefer="resolution=merge-duplicates,return=representation",
@@ -254,21 +280,42 @@ def upsert_mailbox_email_bodies(user_id: str, bodies: list[dict]) -> None:
         )
 
 
-def update_mailbox_email(user_id: str, gmail_message_id: str, values: dict) -> None:
+def update_mailbox_email(user_id: str, connection_id: str, gmail_message_id: str, values: dict) -> None:
     """Update Gmail-derived fields for one saved message."""
     _request(
         "PATCH",
         "emails?user_id=eq." + quote(user_id, safe="")
+        + "&connection_id=eq." + quote(connection_id, safe="")
         + "&gmail_message_id=eq." + quote(gmail_message_id, safe=""),
         values,
         prefer="return=minimal",
     )
 
 
-def mark_mailbox_emails_deleted(user_id: str, gmail_message_ids: list[str]) -> None:
+def mark_mailbox_classification_attempted(
+    user_id: str, connection_id: str, gmail_message_ids: list[str]
+) -> None:
+    """Mark a batch as attempted before calling the model to avoid tight retries."""
+    if not gmail_message_ids:
+        return
+    ids = ",".join(f'"{quote(message_id, safe="")}"' for message_id in gmail_message_ids)
+    _request(
+        "PATCH",
+        "emails?user_id=eq." + quote(user_id, safe="")
+        + "&connection_id=eq." + quote(connection_id, safe="")
+        + "&gmail_message_id=in.(" + ids + ")",
+        {
+            "ai_label_status": "failed",
+            "classification_attempted_at": datetime.now(timezone.utc).isoformat(),
+        },
+        prefer="return=minimal",
+    )
+
+
+def mark_mailbox_emails_deleted(user_id: str, connection_id: str, gmail_message_ids: list[str]) -> None:
     """Soft-delete messages removed from Gmail or moved to Trash."""
     for gmail_id in gmail_message_ids:
-        update_mailbox_email(user_id, gmail_id, {"deleted": True})
+        update_mailbox_email(user_id, connection_id, gmail_id, {"deleted": True})
 
 
 def hide_persistent_email(user_id: str, email_id: str) -> bool:
@@ -284,20 +331,29 @@ def hide_persistent_email(user_id: str, email_id: str) -> bool:
     return isinstance(rows, list) and bool(rows)
 
 
-def get_unlabeled_mailbox_emails(user_id: str, limit: int = 100) -> list[dict]:
+def get_unlabeled_mailbox_emails(user_id: str, connection_id: str, limit: int = 100) -> list[dict]:
     """Load saved message text for later classification retries."""
     from .email_tool import normalize_email_body
 
     user_filter = quote(user_id, safe="")
+    connection_filter = quote(connection_id, safe="")
     cutoff_ms = int((datetime.now(timezone.utc) - timedelta(hours=24)).timestamp() * 1000)
     rows = _request(
         "GET",
-        "emails?select=id,gmail_message_id,sender,subject,snippet,internal_date,gmail_labels,ai_label_status"
-        f"&user_id=eq.{user_filter}&ai_label_status=in.(unlabeled,failed)"
+        "emails?select=id,gmail_message_id,sender,subject,snippet,internal_date,gmail_labels,ai_label_status,classification_attempted_at"
+        f"&user_id=eq.{user_filter}&connection_id=eq.{connection_filter}"
+        "&ai_label_status=in.(unlabeled,failed)"
         f"&internal_date=gte.{cutoff_ms}"
         f"&deleted=eq.false&hidden_in_app=eq.false"
         f"&order=internal_date.asc&limit={max(1, min(limit, 500))}",
     )
+    retry_before = datetime.now(timezone.utc) - timedelta(minutes=15)
+    rows = [
+        row for row in rows or []
+        if row.get("ai_label_status") == "unlabeled"
+        or not row.get("classification_attempted_at")
+        or datetime.fromisoformat(row["classification_attempted_at"].replace("Z", "+00:00")) < retry_before
+    ]
     body_by_email_id = {}
     for offset in range(0, len(rows or []), 100):
         email_ids = [row["id"] for row in rows[offset : offset + 100]]
@@ -329,12 +385,13 @@ def get_unlabeled_mailbox_emails(user_id: str, limit: int = 100) -> list[dict]:
     return pending
 
 
-def get_persistent_gmail_ids_since(user_id: str, cutoff_ms: int) -> set[str]:
+def get_persistent_gmail_ids_since(user_id: str, connection_id: str, cutoff_ms: int) -> set[str]:
     """List saved Gmail IDs at or after a date, for expired-cursor reconciliation."""
     rows = _request(
         "GET",
         "emails?select=gmail_message_id"
         "&user_id=eq." + quote(user_id, safe="")
+        + "&connection_id=eq." + quote(connection_id, safe="")
         + "&internal_date=gte." + str(max(0, int(cutoff_ms)))
         + "&deleted=eq.false&limit=1000",
     )
@@ -345,21 +402,28 @@ def get_persistent_gmail_ids_since(user_id: str, cutoff_ms: int) -> set[str]:
     }
 
 
-def get_persistent_emails(user_id: str) -> list[dict]:
+def get_persistent_emails(user_id: str, connection_id: str | None = None) -> list[dict]:
     """Read this user's non-deleted emails from the most recent rolling 24 hours."""
     rows = []
     offset = 0
     page_size = 500
     user_filter = quote(user_id, safe="")
+    connection_filter = quote(connection_id, safe="") if connection_id else None
     cutoff_ms = int((datetime.now(timezone.utc) - timedelta(hours=24)).timestamp() * 1000)
     while True:
+        query = (
+            "emails?select=id,gmail_message_id,connection_id,sender,subject,snippet,internal_date,gmail_labels,ai_label,ai_label_status"
+            f"&user_id=eq.{user_filter}&deleted=eq.false"
+        )
+        if connection_filter:
+            query += f"&connection_id=eq.{connection_filter}"
+        query += (
+            f"&hidden_in_app=eq.false&internal_date=gte.{cutoff_ms}"
+            f"&order=internal_date.desc&limit={page_size}&offset={offset}"
+        )
         page = _request(
             "GET",
-            "emails?select=id,gmail_message_id,sender,subject,snippet,internal_date,gmail_labels,ai_label,ai_label_status"
-            f"&user_id=eq.{user_filter}&deleted=eq.false"
-            f"&hidden_in_app=eq.false"
-            f"&internal_date=gte.{cutoff_ms}"
-            f"&order=internal_date.desc&limit={page_size}&offset={offset}",
+            query,
         )
         if not isinstance(page, list):
             raise RuntimeError("Supabase returned an invalid mailbox email list.")
@@ -382,6 +446,7 @@ def get_persistent_emails(user_id: str) -> list[dict]:
         emails.append({
             "id": row["id"],
             "gmail_message_id": row["gmail_message_id"],
+            "connection_id": row.get("connection_id"),
             "from": row.get("sender", ""),
             "subject": row.get("subject", "(No subject)"),
             "received": received.isoformat(timespec="minutes"),
@@ -401,7 +466,7 @@ def get_persistent_email_by_id(user_id: str, email_id: str) -> dict | None:
     email_filter = quote(email_id, safe="")
     rows = _request(
         "GET",
-        "emails?select=id,gmail_message_id,sender,subject,internal_date,gmail_labels,ai_label,ai_label_status"
+        "emails?select=id,gmail_message_id,connection_id,sender,subject,internal_date,gmail_labels,ai_label,ai_label_status"
         f"&id=eq.{email_filter}&user_id=eq.{user_filter}"
         "&deleted=eq.false&hidden_in_app=eq.false&limit=1",
     )
@@ -418,6 +483,7 @@ def get_persistent_email_by_id(user_id: str, email_id: str) -> dict | None:
     return {
         "id": row["id"],
         "gmail_message_id": row["gmail_message_id"],
+        "connection_id": row.get("connection_id"),
         "from": row.get("sender", ""),
         "subject": row.get("subject", "(No subject)"),
         "received": received.isoformat(timespec="minutes"),
@@ -428,18 +494,25 @@ def get_persistent_email_by_id(user_id: str, email_id: str) -> dict | None:
 
 
 def list_gmail_connections() -> list[dict[str, str]]:
-    """List app-user IDs with a connected Gmail account, without returning tokens."""
+    """List connected mailbox IDs and owners, without returning tokens."""
     rows = _request(
         "GET",
-        "gmail_connections?select=user_id&order=connected_at.asc&limit=1000",
+        "gmail_connections?select=id,user_id,gmail_email&order=connected_at.asc&limit=1000",
     )
     if not isinstance(rows, list):
         raise RuntimeError("Supabase returned an invalid Gmail connection list.")
     connections = []
     for row in rows:
-        user_id = row.get("user_id") if isinstance(row, dict) else None
-        if isinstance(user_id, str) and user_id:
-            connections.append({"user_id": user_id})
+        if not isinstance(row, dict):
+            continue
+        user_id = row.get("user_id")
+        connection_id = row.get("id")
+        if isinstance(user_id, str) and user_id and isinstance(connection_id, str) and connection_id:
+            connections.append({
+                "user_id": user_id,
+                "connection_id": connection_id,
+                "email": row.get("gmail_email", ""),
+            })
     return connections
 
 

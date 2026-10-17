@@ -8,6 +8,7 @@ const CATEGORY_ICONS = {
 };
 
 const categoryNav = document.querySelector("#category-nav");
+const accountFilters = document.querySelector("#account-filters");
 const filterTabs = document.querySelector("#filter-tabs");
 const emailList = document.querySelector("#email-list");
 const emptyState = document.querySelector("#empty-state");
@@ -20,8 +21,10 @@ const connectionNote = document.querySelector("#connection-note");
 const emailDialog = document.querySelector("#email-dialog");
 const summaryDialog = document.querySelector("#summary-dialog");
 let emails = [];
+let gmailAccounts = [];
 let selectedEmail = null;
 let activeFilter = "All mail";
+let activeAccountFilter = "all";
 let supabaseClient = null;
 let currentSession = null;
 let activeUserId = null;
@@ -31,7 +34,32 @@ let gmailStatusChecked = false;
 let syncInFlight = false;
 let lastSyncAt = 0;
 let autoSyncTimer = null;
-const AUTO_SYNC_INTERVAL_MS = 5 * 60 * 1000;
+const MAX_GMAIL_ACCOUNTS = 2;
+const AUTO_SYNC_INTERVAL_MS = 30 * 1000;
+
+function accountFilterStorageKey(userId = activeUserId) {
+  return userId ? `today-mail-account-filter:${userId}` : "";
+}
+
+function rememberAccountFilter() {
+  const key = accountFilterStorageKey();
+  if (!key) return;
+  try {
+    window.localStorage.setItem(key, activeAccountFilter);
+  } catch {
+    // The filter still works for this page even if browser storage is unavailable.
+  }
+}
+
+function restoreAccountFilter(userId) {
+  activeAccountFilter = "all";
+  if (!userId) return;
+  try {
+    activeAccountFilter = window.localStorage.getItem(accountFilterStorageKey(userId)) || "all";
+  } catch {
+    activeAccountFilter = "all";
+  }
+}
 
 async function initAppAuth() {
   const authScreen = document.querySelector("#auth-screen");
@@ -58,8 +86,10 @@ async function initAppAuth() {
       const nextUserId = session?.user?.id || null;
       if (activeUserId !== nextUserId) {
         emails = [];
+        gmailAccounts = [];
         activeFilter = "All mail";
         activeUserId = nextUserId;
+        restoreAccountFilter(nextUserId);
         dashboardLoadedUserId = null;
         gmailConnected = false;
         gmailStatusChecked = false;
@@ -144,14 +174,29 @@ async function updateGmailStatus() {
     const response = await apiFetch("/api/gmail/status");
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.detail || "Could not check Gmail connection.");
-    if (payload.connected) {
+    gmailAccounts = Array.isArray(payload.accounts) ? payload.accounts : (
+      payload.connected && payload.email
+        ? [{ id: "legacy", email: payload.email }]
+        : []
+    );
+    const connected = gmailAccounts.length > 0 || Boolean(payload.connected);
+    if (connected) {
       gmailConnected = true;
-      setConnected(payload.email);
+      const accountNames = gmailAccounts.map((account) => account.email).filter(Boolean);
+      const statusText = accountNames.length
+        ? `${accountNames.length} Gmail ${accountNames.length === 1 ? "account" : "accounts"} connected`
+        : `Connected as ${payload.email}`;
+      setConnected(statusText);
+      if (activeAccountFilter !== "all" && !gmailAccounts.some((account) => account.id === activeAccountFilter)) {
+        activeAccountFilter = "all";
+        rememberAccountFilter();
+      }
       document.querySelector("#empty-connect").hidden = true;
       if (new URLSearchParams(window.location.search).get("gmail") === "connected") {
         window.history.replaceState({}, "", window.location.pathname);
       }
     } else {
+      gmailAccounts = [];
       gmailConnected = false;
       gmailStatus.textContent = "Gmail is not connected";
       connectionNote.textContent = "Gmail not connected";
@@ -160,10 +205,15 @@ async function updateGmailStatus() {
       document.querySelector("#empty-connect").hidden = false;
     }
     gmailStatusChecked = true;
+    if (new URLSearchParams(window.location.search).get("gmail") === "limit") {
+      showError("You can connect a maximum of two Gmail accounts to this app.");
+      window.history.replaceState({}, "", window.location.pathname);
+    }
     renderDashboard();
   } catch (error) {
     gmailStatus.textContent = error.message || "Could not check Gmail connection.";
     gmailConnected = false;
+    gmailAccounts = [];
     gmailStatusChecked = true;
     connectionNote.textContent = "Gmail status unavailable";
     renderDashboard();
@@ -176,13 +226,21 @@ document.querySelector("#current-date").textContent = new Intl.DateTimeFormat("e
 
 function setConnected(email) {
   gmailStatusChecked = true;
-  gmailStatus.textContent = `Connected as ${email}`;
+  gmailStatus.textContent = email.startsWith("Connected as ") || email.includes("accounts connected")
+    ? email
+    : `Connected as ${email}`;
   connectionNote.textContent = "Gmail connected";
-  connectButton.textContent = "Gmail connected ✓";
+  connectButton.textContent = gmailAccounts.length >= MAX_GMAIL_ACCOUNTS
+    ? "2 accounts connected"
+    : "Add another Gmail ↗";
   connectButton.classList.add("connected");
 }
 
 async function connectGmail() {
+  if (gmailAccounts.length >= MAX_GMAIL_ACCOUNTS) {
+    showError("You can connect up to two Gmail accounts.");
+    return;
+  }
   connectButton.disabled = true;
   connectButton.textContent = "Opening Google…";
   gmailStatus.textContent = "Approve Gmail access in the Google window.";
@@ -214,6 +272,7 @@ async function loadDatabaseEmails() {
   const payload = await response.json();
   if (!response.ok) throw new Error(payload.detail || "Could not load saved emails.");
   emails = payload.emails || [];
+  if (Array.isArray(payload.accounts)) gmailAccounts = payload.accounts;
   renderDashboard();
   loadingState.hidden = true;
 }
@@ -234,6 +293,7 @@ async function syncEmails() {
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.detail || "Could not refresh your saved inbox.");
     emails = payload.emails || [];
+    if (Array.isArray(payload.accounts)) gmailAccounts = payload.accounts;
     renderDashboard();
     lastSyncAt = Date.now();
     syncStatus.textContent = "Saved inbox updated.";
@@ -276,7 +336,7 @@ async function startDashboard(userId) {
       if (document.visibilityState === "visible") void syncEmails();
     }, AUTO_SYNC_INTERVAL_MS);
     document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible" && Date.now() - lastSyncAt > 60_000) {
+      if (document.visibilityState === "visible" && Date.now() - lastSyncAt > AUTO_SYNC_INTERVAL_MS) {
         void syncEmails();
       }
     });
@@ -292,14 +352,54 @@ function matchingCategory(email) {
   return CATEGORY_NAMES.find((name) => (email.labels || []).includes(name)) || "Unsorted";
 }
 
+function emailsForSelectedAccount() {
+  if (activeAccountFilter === "all") return emails;
+  return emails.filter((email) => email.connection_id === activeAccountFilter);
+}
+
+function renderAccountFilters() {
+  accountFilters.replaceChildren();
+  if (!gmailAccounts.length) {
+    accountFilters.hidden = true;
+    return;
+  }
+  accountFilters.hidden = false;
+  const options = [
+    { id: "all", email: "All accounts", all: true },
+    ...gmailAccounts.map((account) => ({
+      id: account.id,
+      email: account.email,
+      all: false,
+    })),
+  ];
+  for (const account of options) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `account-filter${account.all ? " all-accounts" : ""}${activeAccountFilter === account.id ? " active" : ""}`;
+    button.setAttribute("aria-pressed", String(activeAccountFilter === account.id));
+    const dot = document.createElement("span");
+    dot.className = "account-filter-dot";
+    const label = document.createElement("span");
+    label.textContent = account.email;
+    button.append(dot, label);
+    button.addEventListener("click", () => {
+      activeAccountFilter = account.id;
+      rememberAccountFilter();
+      renderDashboard();
+    });
+    accountFilters.append(button);
+  }
+}
+
 function renderFilters() {
   const items = ["All mail", ...CATEGORY_NAMES, "Unsorted"];
+  const accountEmails = emailsForSelectedAccount();
   filterTabs.replaceChildren();
   categoryNav.replaceChildren();
   for (const name of items) {
     const count = name === "All mail"
-      ? emails.length
-      : emails.filter((email) => matchingCategory(email) === name).length;
+      ? accountEmails.length
+      : accountEmails.filter((email) => matchingCategory(email) === name).length;
     const tab = document.createElement("button");
     tab.type = "button";
     tab.className = `filter-tab${activeFilter === name ? " active" : ""}`;
@@ -403,6 +503,17 @@ function renderEmail(email) {
   chip.className = `label-chip ${categoryClass(category)}`;
   chip.textContent = category;
   labels.append(chip);
+  if (activeAccountFilter === "all") {
+    const accountEmail = email.account_email
+      || gmailAccounts.find((account) => account.id === email.connection_id)?.email;
+    if (accountEmail) {
+      const accountTag = document.createElement("span");
+      accountTag.className = "account-tag";
+      accountTag.textContent = accountEmail;
+      accountTag.title = accountEmail;
+      labels.append(accountTag);
+    }
+  }
   for (const label of (email.labels || []).filter((name) => name !== category)) {
     const extra = document.createElement("span");
     extra.className = "label-chip extra-label";
@@ -425,16 +536,19 @@ function renderEmail(email) {
   card.append(avatar, content);
   card.dataset.renderKey = JSON.stringify([
     email.from, email.subject, email.received, email.preview, email.labels,
+    email.connection_id, email.account_email,
   ]);
   return card;
 }
 
 function renderDashboard() {
+  renderAccountFilters();
   renderFilters();
-  document.querySelector("#email-count").textContent = String(emails.length);
-  document.querySelector("#sidebar-count").textContent = String(emails.length);
-  document.querySelector("#summary-title").textContent = emails.length
-    ? `${emails.length} ${emails.length === 1 ? "email" : "emails"} in your recent inbox`
+  const accountEmails = emailsForSelectedAccount();
+  document.querySelector("#email-count").textContent = String(accountEmails.length);
+  document.querySelector("#sidebar-count").textContent = String(accountEmails.length);
+  document.querySelector("#summary-title").textContent = accountEmails.length
+    ? `${accountEmails.length} ${accountEmails.length === 1 ? "email" : "emails"} in your recent inbox`
     : "Your recent mail, in one place";
   document.querySelector("#summary-subtitle").textContent = emails.length
     ? "Use a category to narrow the list, or summarize one email."
@@ -444,14 +558,15 @@ function renderDashboard() {
         ? "Gmail is connected. New messages will appear here after syncing."
         : "Connect Gmail to load your recent inbox automatically.";
   const shown = activeFilter === "All mail"
-    ? emails
-    : emails.filter((email) => matchingCategory(email) === activeFilter);
+    ? accountEmails
+    : accountEmails.filter((email) => matchingCategory(email) === activeFilter);
   const existingCards = new Map(
     [...emailList.children].map((card) => [card.dataset.emailId, card]),
   );
   const nextCards = shown.map((email) => {
     const renderKey = JSON.stringify([
       email.from, email.subject, email.received, email.preview, email.labels,
+      email.connection_id, email.account_email,
     ]);
     const existing = existingCards.get(email.id);
     if (existing?.dataset.renderKey === renderKey) return existing;
@@ -462,10 +577,10 @@ function renderDashboard() {
   emailList.replaceChildren(...nextCards);
   emailList.hidden = shown.length === 0;
   emptyState.hidden = shown.length > 0;
-  if (emails.length && !shown.length) {
+  if (accountEmails.length && !shown.length) {
     emptyState.hidden = false;
     emptyState.querySelector("h3").textContent = `No emails in ${activeFilter}`;
-    emptyState.querySelector("p").textContent = "Emails will appear here when they have this category.";
+    emptyState.querySelector("p").textContent = "Emails will appear here when they match this category and account.";
     document.querySelector("#empty-connect").hidden = true;
   } else {
     emptyState.querySelector("h3").textContent = "Your inbox will show up here";

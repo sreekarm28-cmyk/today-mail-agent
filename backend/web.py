@@ -33,10 +33,12 @@ from .runtime import (
     sync_persistent_mailbox,
 )
 from .user_tokens import (
-    get_gmail_connection,
+    GmailAccountLimitError,
+    get_gmail_connection_by_email,
     hide_persistent_email,
     get_persistent_email_by_id,
     get_persistent_emails,
+    list_user_gmail_connections,
     save_gmail_connection,
 )
 
@@ -252,11 +254,16 @@ def connect_gmail(
 ) -> dict[str, str]:
     if user:
         try:
+            if len(list_user_gmail_connections(user["id"])) >= 2:
+                raise HTTPException(
+                    status_code=409,
+                    detail="You can connect up to two Gmail accounts.",
+                )
             flow = _web_oauth_flow(autogenerate_code_verifier=True)
             authorization_url, state = flow.authorization_url(
                 access_type="offline",
                 include_granted_scopes="true",
-                prompt="consent",
+                prompt="select_account consent",
             )
             if not flow.code_verifier:
                 raise RuntimeError("Could not create the Google sign-in verifier.")
@@ -279,6 +286,8 @@ def connect_gmail(
             )
             return {"authorization_url": authorization_url}
         except Exception as exc:
+            if isinstance(exc, HTTPException):
+                raise
             logger.exception("Could not start Gmail connection")
             raise HTTPException(status_code=503, detail="Something went wrong. Please try again.") from exc
     try:
@@ -318,22 +327,26 @@ def connect_gmail_callback(
         flow = _web_oauth_flow(state=state, code_verifier=code_verifier)
         flow.fetch_token(code=code)
         credentials = flow.credentials
-        if not credentials.refresh_token:
-            stage = "checking for an existing Gmail connection"
-            existing = get_gmail_connection(state_data["user_id"])
-            if not existing:
-                raise RuntimeError("Google did not return a reusable permission. Try connecting again and approve access.")
-            refresh_token = existing["refresh_token"]
-        else:
-            refresh_token = credentials.refresh_token
         stage = "checking the connected Gmail account"
         gmail_email = gmail_account_email(credentials)
+        existing = get_gmail_connection_by_email(state_data["user_id"], gmail_email)
+        if not credentials.refresh_token and not existing:
+            raise RuntimeError("Google did not return a reusable permission. Try connecting again and approve access.")
+        if not existing and len(list_user_gmail_connections(state_data["user_id"])) >= 2:
+            redirect = RedirectResponse("/?gmail=limit", status_code=303)
+            redirect.delete_cookie(OAUTH_STATE_COOKIE, path="/")
+            return redirect
+        refresh_token = credentials.refresh_token or existing["refresh_token"]
         stage = "saving the encrypted Gmail token to Supabase"
         save_gmail_connection(state_data["user_id"], gmail_email, refresh_token)
         redirect = RedirectResponse("/?gmail=connected", status_code=303)
         redirect.delete_cookie(OAUTH_STATE_COOKIE, path="/")
         return redirect
     except Exception as exc:
+        if isinstance(exc, GmailAccountLimitError):
+            redirect = RedirectResponse("/?gmail=limit", status_code=303)
+            redirect.delete_cookie(OAUTH_STATE_COOKIE, path="/")
+            return redirect
         logger.error(
             "Gmail OAuth callback failed during %s (%s): %s",
             stage,
@@ -344,13 +357,19 @@ def connect_gmail_callback(
 
 
 @app.get("/api/gmail/status")
-def gmail_status(user: dict | None = Depends(_require_app_user)) -> dict[str, str | bool]:
+def gmail_status(user: dict | None = Depends(_require_app_user)) -> dict:
     if not user:
-        return {"connected": False, "email": ""}
-    connection = get_gmail_connection(user["id"])
+        return {"connected": False, "email": "", "accounts": [], "max_accounts": 2}
+    connections = list_user_gmail_connections(user["id"])
+    accounts = [
+        {"id": item["id"], "email": item["gmail_email"]}
+        for item in connections
+    ]
     return {
-        "connected": bool(connection),
-        "email": connection["email"] if connection else "",
+        "connected": bool(accounts),
+        "email": accounts[0]["email"] if accounts else "",
+        "accounts": accounts,
+        "max_accounts": 2,
     }
 
 
@@ -361,10 +380,15 @@ def dashboard_emails(user: dict | None = Depends(_require_app_user)) -> dict:
     if not user:
         raise HTTPException(status_code=401, detail="Sign in to view your saved inbox.")
     try:
+        connections = list_user_gmail_connections(user["id"])
+        account_emails = {item["id"]: item["gmail_email"] for item in connections}
         dashboard_items = get_persistent_emails(user["id"])
+        for item in dashboard_items:
+            item["account_email"] = account_emails.get(item.get("connection_id"), "")
         log_timing("dashboard.database_read", started, email_count=len(dashboard_items))
         return {
             "emails": dashboard_items,
+            "accounts": [{"id": item["id"], "email": item["gmail_email"]} for item in connections],
             "categories": CATEGORIES,
             "sync_status": "database",
         }
@@ -380,7 +404,7 @@ def initial_mailbox_sync(user: dict | None = Depends(_require_app_user)) -> dict
     if not user:
         raise HTTPException(status_code=401, detail="Sign in to sync your mailbox.")
     try:
-        return initial_sync_mailbox(user["id"], user.get("email", ""))
+        return initial_sync_mailbox(user["id"])
     except Exception as exc:
         logger.exception("Could not complete initial mailbox sync")
         raise HTTPException(status_code=400, detail="Could not sync your mailbox. Please try again.") from exc
@@ -394,10 +418,15 @@ def sync_dashboard_emails(user: dict | None = Depends(_require_app_user)) -> dic
         raise HTTPException(status_code=401, detail="Sign in to sync your saved inbox.")
     try:
         sync_result = sync_persistent_mailbox(user["id"], user.get("email", ""))
+        connections = list_user_gmail_connections(user["id"])
+        account_emails = {item["id"]: item["gmail_email"] for item in connections}
         dashboard_items = get_persistent_emails(user["id"])
+        for item in dashboard_items:
+            item["account_email"] = account_emails.get(item.get("connection_id"), "")
         log_timing("dashboard.database_sync", started, email_count=len(dashboard_items))
         return {
             "emails": dashboard_items,
+            "accounts": [{"id": item["id"], "email": item["gmail_email"]} for item in connections],
             "categories": CATEGORIES,
             "sync_status": sync_result.get("status", "database"),
         }

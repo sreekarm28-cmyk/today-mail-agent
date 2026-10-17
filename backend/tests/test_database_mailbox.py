@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from backend import user_tokens
 
 
-def test_email_upsert_uses_user_and_gmail_id_as_conflict_key(monkeypatch):
+def test_email_upsert_uses_connection_and_gmail_id_as_conflict_key(monkeypatch):
     calls = []
 
     def fake_request(method, path, payload=None, prefer=None):
@@ -24,14 +24,16 @@ def test_email_upsert_uses_user_and_gmail_id_as_conflict_key(monkeypatch):
 
     result = user_tokens.upsert_mailbox_emails(
         "user-1",
+        "connection-1",
         [{"id": "gmail-1", "internal_date": 1_797_000_000_000}],
     )
 
     assert result["gmail-1"]["id"] == "db-1"
     method, path, rows, prefer = calls[0]
     assert method == "POST"
-    assert "on_conflict=user_id,gmail_message_id" in path
+    assert "on_conflict=connection_id,gmail_message_id" in path
     assert rows[0]["user_id"] == "user-1"
+    assert rows[0]["connection_id"] == "connection-1"
     assert rows[0]["gmail_message_id"] == "gmail-1"
     assert "resolution=merge-duplicates" in prefer
 

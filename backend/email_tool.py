@@ -124,7 +124,7 @@ def _body(message) -> str:
     return "(No readable text body available.)"
 
 
-def _credentials(user_id: str | None = None):
+def _credentials(user_id: str | None = None, connection_id: str | None = None):
     """Load and refresh the local user's OAuth token, opening Google sign-in once if needed."""
     try:
         from google.auth.transport.requests import Request
@@ -136,7 +136,9 @@ def _credentials(user_id: str | None = None):
     if user_id:
         from .user_tokens import get_gmail_connection
 
-        connection = get_gmail_connection(user_id)
+        if not connection_id:
+            raise RuntimeError("Choose a connected Gmail account first.")
+        connection = get_gmail_connection(user_id, connection_id)
         if not connection:
             raise RuntimeError("Connect your Gmail account first.")
         client_id = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "")
@@ -183,13 +185,17 @@ def _credentials(user_id: str | None = None):
     return credentials
 
 
-def _gmail_service(user_id: str | None = None, credentials=None):
+def _gmail_service(
+    user_id: str | None = None, connection_id: str | None = None, credentials=None
+):
     try:
         from googleapiclient.discovery import build
     except ImportError as exc:
         raise RuntimeError("Install requirements first: py -m pip install -r requirements.txt") from exc
     return build(
-        "gmail", "v1", credentials=credentials or _credentials(user_id), cache_discovery=False
+        "gmail", "v1",
+        credentials=credentials or _credentials(user_id, connection_id),
+        cache_discovery=False,
     )
 
 
@@ -208,11 +214,11 @@ def gmail_account_email(credentials) -> str:
     return profile.get("emailAddress", "")
 
 
-def prepare_initial_mailbox_sync(user_id: str, days: int):
+def prepare_initial_mailbox_sync(user_id: str, days: int, connection_id: str):
     """Build one Gmail client and read the history ID before listing mailbox messages."""
-    credentials = _credentials(user_id)
+    credentials = _credentials(user_id, connection_id)
     service_started = perf_counter()
-    service = _gmail_service(user_id, credentials=credentials)
+    service = _gmail_service(user_id, connection_id, credentials=credentials)
     log_timing("gmail.client_ready", service_started)
     profile = service.users().getProfile(userId="me").execute()
     history_id = profile.get("historyId")
@@ -318,11 +324,11 @@ def fetch_initial_mailbox_messages(service, cutoff_ms: int) -> list[dict]:
     return results
 
 
-def prepare_incremental_mailbox_sync(user_id: str):
+def prepare_incremental_mailbox_sync(user_id: str, connection_id: str):
     """Return a Gmail client and the current cursor used for history fallback."""
-    credentials = _credentials(user_id)
+    credentials = _credentials(user_id, connection_id)
     started = perf_counter()
-    service = _gmail_service(user_id, credentials=credentials)
+    service = _gmail_service(user_id, connection_id, credentials=credentials)
     log_timing("gmail.client_ready", started)
     profile = service.users().getProfile(userId="me").execute()
     history_id = profile.get("historyId")
@@ -428,10 +434,12 @@ def fetch_gmail_history_changes(service, start_history_id: str) -> dict:
     }
 
 
-def ensure_user_labels(label_names: list[str], user_id: str | None = None) -> list[dict[str, str]]:
+def ensure_user_labels(
+    label_names: list[str], user_id: str | None = None, connection_id: str | None = None
+) -> list[dict[str, str]]:
     """Return existing labels and create any requested custom labels that are missing."""
     started = perf_counter()
-    service = _gmail_service(user_id)
+    service = _gmail_service(user_id, connection_id)
     labels = service.users().labels().list(userId="me").execute().get("labels", [])
     by_name = {
         label["name"]: {"id": label["id"], "name": label["name"]}
@@ -458,11 +466,17 @@ def ensure_user_labels(label_names: list[str], user_id: str | None = None) -> li
     return list(by_name.values())
 
 
-def apply_user_label(message_id: str, label_id: str, label_name: str, user_id: str | None = None) -> str:
+def apply_user_label(
+    message_id: str,
+    label_id: str,
+    label_name: str,
+    user_id: str | None = None,
+    connection_id: str | None = None,
+) -> str:
     """Apply a previously verified existing user label to one Gmail message."""
     started = perf_counter()
     try:
-        _gmail_service(user_id).users().messages().modify(
+        _gmail_service(user_id, connection_id).users().messages().modify(
             userId="me",
             id=message_id,
             body={"addLabelIds": [label_id]},

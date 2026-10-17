@@ -109,6 +109,17 @@ def list_user_gmail_connections(user_id: str) -> list[dict]:
     return rows
 
 
+def delete_gmail_connection(user_id: str, connection_id: str) -> bool:
+    """Disconnect one of this user's Gmail accounts and cascade its app data."""
+    rows = _request(
+        "DELETE",
+        "gmail_connections?select=id&user_id=eq."
+        f"{quote(user_id, safe='')}&id=eq.{quote(connection_id, safe='')}",
+        prefer="return=representation",
+    )
+    return isinstance(rows, list) and bool(rows)
+
+
 def get_gmail_connection(user_id: str, connection_id: str) -> dict | None:
     path = (
         "gmail_connections?select=id,user_id,gmail_email,refresh_token_ciphertext&user_id=eq."

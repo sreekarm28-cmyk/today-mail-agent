@@ -86,3 +86,19 @@ def test_dashboard_sync_can_target_one_connected_gmail_account(monkeypatch):
 
     assert sync_calls == ["connection-2"]
     assert result["accounts_processed"] == 1
+
+
+def test_disconnect_endpoint_only_disconnects_the_signed_in_users_account(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        web,
+        "delete_gmail_connection",
+        lambda user_id, connection_id: calls.append((user_id, connection_id)) or True,
+    )
+
+    result = web.disconnect_gmail_account(
+        "connection-1", {"id": "user-1"}
+    )
+
+    assert calls == [("user-1", "connection-1")]
+    assert result["status"] == "disconnected"

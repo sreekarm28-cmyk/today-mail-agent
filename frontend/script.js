@@ -84,7 +84,8 @@ async function initAppAuth() {
     const updateSession = (session) => {
       currentSession = session;
       const nextUserId = session?.user?.id || null;
-      if (activeUserId !== nextUserId) {
+      const userChanged = activeUserId !== nextUserId;
+      if (userChanged) {
         emails = [];
         gmailAccounts = [];
         activeFilter = "All mail";
@@ -101,14 +102,16 @@ async function initAppAuth() {
       appShell.hidden = !signedIn;
       signOutButton.hidden = !signedIn;
       if (signedIn) {
-        gmailStatus.textContent = "Checking Gmail connection…";
-        connectionNote.textContent = "Signed in";
-        connectButton.textContent = "Connect Gmail ↗";
-        connectButton.classList.remove("connected");
-        connectButton.disabled = false;
+        if (userChanged) {
+          gmailStatus.textContent = "Checking Gmail connection…";
+          connectionNote.textContent = "Signed in";
+          connectButton.textContent = "Connect Gmail ↗";
+          connectButton.classList.remove("connected");
+          connectButton.disabled = false;
+        }
         document.querySelector("#empty-connect").disabled = false;
         // Load saved inbox data while checking the Gmail connection status.
-        void startDashboard(nextUserId);
+        if (userChanged || dashboardLoadedUserId !== nextUserId) void startDashboard(nextUserId);
       } else {
         gmailStatus.textContent = "Connect Gmail to get started";
         connectionNote.textContent = "Gmail not connected";
@@ -234,6 +237,46 @@ function setConnected(email) {
     ? "2 accounts connected"
     : "Add another Gmail ↗";
   connectButton.classList.add("connected");
+}
+
+async function disconnectGmailAccount(account, button) {
+  const confirmed = window.confirm(
+    `Disconnect ${account.email}? Its saved emails and sync data will be removed from this app. The messages will remain in Gmail.`,
+  );
+  if (!confirmed) return;
+
+  button.disabled = true;
+  button.textContent = "…";
+  try {
+    const response = await apiFetch(`/api/gmail/accounts/${encodeURIComponent(account.id)}`, {
+      method: "DELETE",
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || "Could not disconnect Gmail.");
+
+    gmailAccounts = gmailAccounts.filter((item) => item.id !== account.id);
+    emails = emails.filter((email) => email.connection_id !== account.id);
+    if (activeAccountFilter === account.id) activeAccountFilter = "all";
+    rememberAccountFilter();
+    gmailConnected = gmailAccounts.length > 0;
+    if (gmailConnected) {
+      const names = gmailAccounts.map((item) => item.email).filter(Boolean);
+      setConnected(`${names.length} Gmail ${names.length === 1 ? "account" : "accounts"} connected`);
+    } else {
+      gmailStatus.textContent = "Gmail is not connected";
+      connectionNote.textContent = "Gmail not connected";
+      connectButton.textContent = "Connect Gmail ↗";
+      connectButton.classList.remove("connected");
+      document.querySelector("#empty-connect").hidden = false;
+    }
+    syncStatus.hidden = false;
+    syncStatus.className = "sync-status";
+    syncStatus.textContent = "Account disconnected. Its saved emails were removed from this app; Gmail is unchanged.";
+    renderDashboard();
+  } catch (error) {
+    showError(error.message || "Could not disconnect Gmail.");
+    renderAccountFilters();
+  }
 }
 
 async function connectGmail() {
@@ -373,6 +416,8 @@ function renderAccountFilters() {
     })),
   ];
   for (const account of options) {
+    const item = document.createElement("div");
+    item.className = "account-filter-item";
     const button = document.createElement("button");
     button.type = "button";
     button.className = `account-filter${account.all ? " all-accounts" : ""}${activeAccountFilter === account.id ? " active" : ""}`;
@@ -387,7 +432,18 @@ function renderAccountFilters() {
       rememberAccountFilter();
       renderDashboard();
     });
-    accountFilters.append(button);
+    item.append(button);
+    if (!account.all) {
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "account-remove-button";
+      remove.textContent = "×";
+      remove.setAttribute("aria-label", `Disconnect ${account.email}`);
+      remove.title = `Disconnect ${account.email}`;
+      remove.addEventListener("click", () => void disconnectGmailAccount(account, remove));
+      item.append(remove);
+    }
+    accountFilters.append(item);
   }
 }
 

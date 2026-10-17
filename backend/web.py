@@ -34,6 +34,7 @@ from .runtime import (
 )
 from .user_tokens import (
     GmailAccountLimitError,
+    delete_gmail_connection,
     get_gmail_connection_by_email,
     hide_persistent_email,
     get_persistent_email_by_id,
@@ -371,6 +372,28 @@ def gmail_status(user: dict | None = Depends(_require_app_user)) -> dict:
         "accounts": accounts,
         "max_accounts": 2,
     }
+
+
+@app.delete("/api/gmail/accounts/{connection_id}")
+def disconnect_gmail_account(
+    connection_id: str,
+    user: dict | None = Depends(_require_app_user),
+) -> dict[str, str]:
+    """Remove one linked Gmail token and its saved messages from this app."""
+    if not user:
+        raise HTTPException(status_code=401, detail="Sign in to disconnect a Gmail account.")
+    try:
+        if not delete_gmail_connection(user["id"], connection_id):
+            raise HTTPException(status_code=404, detail="That Gmail account is not connected to this app.")
+        return {
+            "status": "disconnected",
+            "message": "Gmail account and its saved app emails were removed. Messages remain in Gmail.",
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Could not disconnect a Gmail account")
+        raise HTTPException(status_code=400, detail="Could not disconnect Gmail. Please try again.") from exc
 
 
 @app.get("/api/dashboard/emails")

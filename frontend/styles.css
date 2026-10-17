@@ -102,9 +102,15 @@ button:disabled { cursor: wait; opacity: .58; }
 .sort-note { display: flex; align-items: center; gap: 7px; padding-bottom: 3px; color: #8a8791; font-size: 9px; }
 .sort-dot { width: 5px; height: 5px; flex-basis: 5px; background: var(--violet); }
 .account-filters { display: flex; gap: 7px; margin: 15px 0 0; overflow-x: auto; padding: 1px 0 5px; scrollbar-width: thin; }
+.account-filter-item { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 3px; padding: 2px 4px 2px 0; border: 1px solid #e3e1e5; border-radius: 999px; background: #ffffff96; }
 .account-filter { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 7px; min-height: 34px; padding: 0 12px; border: 1px solid #e3e1e5; border-radius: 999px; background: #ffffff96; color: #6f6c77; font-size: 10px; font-weight: 650; transition: all .15s; }
+.account-filter-item .account-filter { border: 0; background: transparent; }
 .account-filter:hover { border-color: #d4cee5; background: #fff; }
 .account-filter.active { border-color: #cfc5f3; background: #eeeaff; color: #51408f; }
+.account-filter-item:has(.account-filter.active) { border-color: #cfc5f3; background: #eeeaff; }
+.account-remove-button { width: 25px; height: 25px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 50%; background: transparent; color: #8b8793; font-size: 16px; line-height: 1; }
+.account-remove-button:hover { background: #fcebea; color: #a53832; }
+.account-remove-button:disabled { cursor: wait; }
 .account-filter-dot { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: #a59daf; }
 .account-filter.active .account-filter-dot { background: #7562c4; }
 .account-filter.all-accounts .account-filter-dot { background: #7b9a87; }

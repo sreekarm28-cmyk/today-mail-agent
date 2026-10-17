@@ -146,3 +146,24 @@ def test_dashboard_email_list_converts_saved_timestamp(monkeypatch):
     assert result[0]["received"] == expected.isoformat(timespec="minutes")
     assert result[0]["ai_label"] == "Updates"
     assert "Updates" in result[0]["labels"]
+
+
+def test_disconnect_deletes_only_the_owned_connection_without_selecting_tokens(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        user_tokens,
+        "_request",
+        lambda method, path, payload=None, prefer=None: calls.append(
+            (method, path, prefer)
+        ) or [{"id": "connection-1"}],
+    )
+
+    assert user_tokens.delete_gmail_connection("user-1", "connection-1") is True
+
+    method, path, prefer = calls[0]
+    assert method == "DELETE"
+    assert "user_id=eq.user-1" in path
+    assert "id=eq.connection-1" in path
+    assert "select=id" in path
+    assert "refresh_token_ciphertext" not in path
+    assert prefer == "return=representation"

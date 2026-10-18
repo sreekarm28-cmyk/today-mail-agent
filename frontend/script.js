@@ -16,6 +16,8 @@ const loadingState = document.querySelector("#loading-state");
 const loadError = document.querySelector("#load-error");
 const syncStatus = document.querySelector("#sync-status");
 const connectButton = document.querySelector("#connect-gmail");
+const modelDiagnosticButton = document.querySelector("#model-diagnostic");
+const modelDiagnosticResult = document.querySelector("#model-diagnostic-result");
 const gmailStatus = document.querySelector("#gmail-status");
 const connectionNote = document.querySelector("#connection-note");
 const emailDialog = document.querySelector("#email-dialog");
@@ -169,6 +171,33 @@ async function apiFetch(path, options = {}) {
   const headers = new Headers(options.headers || {});
   if (currentSession?.access_token) headers.set("Authorization", `Bearer ${currentSession.access_token}`);
   return fetch(path, { ...options, headers });
+}
+
+async function testModelClassification() {
+  if (!currentSession || modelDiagnosticButton.disabled) return;
+  modelDiagnosticButton.disabled = true;
+  modelDiagnosticButton.textContent = "Testing…";
+  modelDiagnosticResult.hidden = false;
+  modelDiagnosticResult.className = "model-test-result";
+  modelDiagnosticResult.textContent = "Sending three made-up emails to the model. Gmail and saved emails will not be changed.";
+  try {
+    const response = await apiFetch("/api/model/diagnostic", { method: "POST" });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || "Could not test the model.");
+    const details = payload.diagnostics || {};
+    const assignments = Object.values(payload.assignments || {});
+    const labels = assignments.length ? ` Categories: ${assignments.join(", ")}.` : "";
+    modelDiagnosticResult.classList.add(payload.status === "success" ? "is-success" : "has-error");
+    modelDiagnosticResult.textContent = payload.status === "success"
+      ? `Model test passed: it returned a tool call and labeled ${details.assigned_count} of 3 sample emails in ${Math.round(payload.duration_ms / 1000)} seconds.${labels} No real email was changed.`
+      : `Model test did not complete: ${details.reason || "no valid structured assignments"}; tool calls: ${details.tool_call_count ?? 0}; finish reason: ${details.finish_reason || "unknown"}; output tokens: ${details.output_tokens ?? "unknown"}; labeled ${details.assigned_count ?? 0} of 3 sample emails. No real email was changed.`;
+  } catch (error) {
+    modelDiagnosticResult.classList.add("has-error");
+    modelDiagnosticResult.textContent = `${error.message || "Could not test the model."} No real email was changed.`;
+  } finally {
+    modelDiagnosticButton.disabled = false;
+    modelDiagnosticButton.textContent = "Test model";
+  }
 }
 
 async function updateGmailStatus() {
@@ -738,6 +767,7 @@ connectButton.addEventListener("click", connectGmail);
 document.querySelector("#empty-connect").addEventListener("click", connectGmail);
 document.querySelector("#close-email-dialog").addEventListener("click", () => emailDialog.close());
 document.querySelector("#hide-email-button").addEventListener("click", () => hideEmailFromApp());
+modelDiagnosticButton.addEventListener("click", testModelClassification);
 emailDialog.addEventListener("click", (event) => {
   if (event.target === emailDialog) emailDialog.close();
 });

@@ -111,7 +111,8 @@ def classify_batch(
     emails: list[dict],
     *,
     prompt_version: str = "current",
-) -> dict[str, str]:
+    include_diagnostics: bool = False,
+) -> dict[str, str] | tuple[dict[str, str], dict]:
     """Ask the model to classify emails; this function never accesses Gmail."""
     if prompt_version not in CLASSIFICATION_PROMPTS:
         raise ValueError("Unknown classification prompt version.")
@@ -119,7 +120,7 @@ def classify_batch(
         return {}
 
     model_started = perf_counter()
-    message = chat(
+    response = chat(
         [
             {"role": "system", "content": CLASSIFICATION_PROMPTS[prompt_version]},
             {
@@ -151,19 +152,52 @@ def classify_batch(
             CLASSIFICATION_MAX_OUTPUT_TOKENS,
             max(1024, len(emails) * CLASSIFICATION_OUTPUT_TOKENS_PER_EMAIL),
         ),
+        include_diagnostics=include_diagnostics,
     )
+    if include_diagnostics:
+        message, model_diagnostics = response
+    else:
+        message = response
+        model_diagnostics = {}
     log_timing("classification.model_batch", model_started, email_count=len(emails))
     validation_started = perf_counter()
     calls = message.get("tool_calls") or []
     if len(calls) != 1 or (calls[0].get("function") or {}).get("name") != "return_email_categories":
+        if include_diagnostics:
+            return {}, {
+                **model_diagnostics,
+                "tool_call_count": len(calls),
+                "assigned_count": 0,
+                "missing_count": len(emails),
+                "valid": False,
+                "reason": "expected_category_tool_call_missing",
+            }
         raise RuntimeError("The model did not return category assignments.")
     try:
         arguments = json.loads(calls[0]["function"].get("arguments") or "{}")
     except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        if include_diagnostics:
+            return {}, {
+                **model_diagnostics,
+                "tool_call_count": len(calls),
+                "assigned_count": 0,
+                "missing_count": len(emails),
+                "valid": False,
+                "reason": "invalid_tool_arguments",
+            }
         raise ValueError("The model returned invalid category assignments.") from exc
     assignments = arguments.get("assignments") if isinstance(arguments, dict) else None
     expected_ids = {email["id"] for email in emails}
     if not isinstance(assignments, list):
+        if include_diagnostics:
+            return {}, {
+                **model_diagnostics,
+                "tool_call_count": len(calls),
+                "assigned_count": 0,
+                "missing_count": len(emails),
+                "valid": False,
+                "reason": "assignments_is_not_a_list",
+            }
         raise ValueError("The model returned an invalid assignments list.")
 
     categories_by_id = {}
@@ -190,7 +224,51 @@ def classify_batch(
         assigned_count=len(categories_by_id),
         missing_count=len(expected_ids - set(categories_by_id)),
     )
+    if include_diagnostics:
+        return categories_by_id, {
+            **model_diagnostics,
+            "tool_call_count": len(calls),
+            "assigned_count": len(categories_by_id),
+            "missing_count": len(expected_ids - set(categories_by_id)),
+            "valid": len(categories_by_id) == len(expected_ids),
+            "reason": "complete" if len(categories_by_id) == len(expected_ids) else "partial_assignments",
+        }
     return categories_by_id
+
+
+def run_model_classification_diagnostic() -> dict:
+    """Test structured classification using synthetic messages only; no Gmail/DB writes."""
+    examples = [
+        {
+            "id": "diagnostic-urgent-1",
+            "from": "Example Billing <billing@example.invalid>",
+            "subject": "Payment due today",
+            "received": "2026-10-18T09:00:00+05:30",
+            "body": "Please pay the invoice by 5 PM today to avoid interruption.",
+        },
+        {
+            "id": "diagnostic-info-2",
+            "from": "Example Service <updates@example.invalid>",
+            "subject": "Your account settings changed",
+            "received": "2026-10-18T09:10:00+05:30",
+            "body": "This is a confirmation that your profile settings were updated.",
+        },
+        {
+            "id": "diagnostic-promo-3",
+            "from": "Example Shop <offers@example.invalid>",
+            "subject": "Save 20% this weekend",
+            "received": "2026-10-18T09:20:00+05:30",
+            "body": "Shop this weekend and get 20% off selected items.",
+        },
+    ]
+    started = perf_counter()
+    assignments, diagnostics = classify_batch(examples, include_diagnostics=True)
+    return {
+        "status": "success" if diagnostics["valid"] else "failed",
+        "assignments": assignments,
+        "diagnostics": diagnostics,
+        "duration_ms": round((perf_counter() - started) * 1000),
+    }
 
 
 def _initial_sync_mailbox(user_id: str, connection_id: str) -> dict[str, int | str | bool]:

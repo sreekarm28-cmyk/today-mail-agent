@@ -29,6 +29,7 @@ from .runtime import (
     CLASSIFICATION_CATEGORIES,
     initial_sync_mailbox,
     process_scheduled_emails,
+    run_model_classification_diagnostic,
     summarize_one_email,
     sync_persistent_mailbox,
 )
@@ -474,6 +475,37 @@ def process_recent_emails_job(
     # counts so GitHub Actions records success while the unsorted items remain
     # visible for later review or retry.
     return result
+
+
+@app.post("/api/model/diagnostic")
+@limiter.shared_limit(f"{MODEL_REQUESTS_PER_MINUTE}/minute", scope="model-requests-per-minute")
+@limiter.shared_limit(f"{MODEL_REQUESTS_PER_DAY}/day", scope="model-requests-per-day")
+def model_classification_diagnostic(
+    request: Request,
+    user: dict | None = Depends(_require_app_user),
+) -> dict:
+    """Test OpenRouter's classification tool-call behavior with synthetic mail only."""
+    if not user:
+        raise HTTPException(status_code=401, detail="Sign in to test the model.")
+    started = perf_counter()
+    try:
+        result = run_model_classification_diagnostic()
+        log_timing(
+            "classification.synthetic_diagnostic",
+            started,
+            status=result["status"],
+            assigned_count=result["diagnostics"]["assigned_count"],
+            tool_call_count=result["diagnostics"]["tool_call_count"],
+        )
+        return result
+    except Exception as exc:
+        log_timing("classification.synthetic_diagnostic", started, status="error")
+        logger.error("Synthetic model diagnostic failed (%s).", type(exc).__name__)
+        request_id = getattr(request.state, "request_id", "unknown")
+        raise HTTPException(
+            status_code=502,
+            detail=f"The model diagnostic failed. Backend request ID: {request_id}.",
+        ) from exc
 
 
 @app.get("/api/dashboard/emails/{email_id}")

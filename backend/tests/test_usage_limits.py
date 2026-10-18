@@ -26,6 +26,7 @@ class UsageLimitTests(unittest.TestCase):
         paths = {route.path for route in web.app.routes}
         self.assertNotIn("/api/summarize", paths)
         self.assertIn("/api/dashboard/emails/{email_id}/summary", paths)
+        self.assertIn("/api/model/diagnostic", paths)
 
     def test_user_can_make_two_email_summaries_per_minute(self):
         user_key = web._rate_limit_key(_request_for_user("user-a"))
@@ -84,3 +85,30 @@ def test_summary_endpoint_allows_two_requests_then_returns_429(monkeypatch):
     finally:
         web.app.dependency_overrides.pop(web._require_app_user, None)
         web.limiter.reset()
+
+
+def test_model_diagnostic_returns_synthetic_result(monkeypatch):
+    monkeypatch.setattr(web, "run_model_classification_diagnostic", lambda: {
+        "status": "success",
+        "assignments": {"diagnostic-urgent-1": "Urgent Action"},
+        "diagnostics": {
+            "tool_call_count": 1,
+            "assigned_count": 3,
+            "missing_count": 0,
+            "valid": True,
+            "reason": "complete",
+            "finish_reason": "tool_calls",
+            "input_tokens": 200,
+            "output_tokens": 80,
+        },
+        "duration_ms": 1000,
+    })
+    handler = web.model_classification_diagnostic
+    while hasattr(handler, "__wrapped__"):
+        handler = handler.__wrapped__
+    request = Request({"type": "http", "headers": [], "method": "POST", "path": "/api/model/diagnostic"})
+
+    response = handler(request, {"id": "diagnostic-test-user"})
+
+    assert response["status"] == "success"
+    assert response["diagnostics"]["tool_call_count"] == 1

@@ -174,7 +174,13 @@ async function apiFetch(path, options = {}) {
 }
 
 async function testModelClassification() {
-  if (!currentSession || modelDiagnosticButton.disabled) return;
+  if (modelDiagnosticButton.disabled) return;
+  if (!currentSession) {
+    modelDiagnosticResult.hidden = false;
+    modelDiagnosticResult.className = "model-test-result has-error";
+    modelDiagnosticResult.textContent = "Your Today Mail sign-in session is missing. Sign out of Today Mail, sign back in, then try again.";
+    return;
+  }
   modelDiagnosticButton.disabled = true;
   modelDiagnosticButton.textContent = "Testing…";
   modelDiagnosticResult.hidden = false;

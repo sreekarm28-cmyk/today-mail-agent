@@ -32,7 +32,8 @@
           <span>today mail</span>
         </a>
         <div class="sidebar-caption">YOUR MAILSPACE</div>
-        <button class="nav-item selected" type="button"><span class="nav-symbol">▤</span> Inbox <span id="sidebar-count" class="nav-count">0</span></button>
+        <button id="inbox-nav" class="nav-item selected" type="button" aria-current="page"><span class="nav-symbol">▤</span> Inbox <span id="sidebar-count" class="nav-count">0</span></button>
+        <button id="ask-ai-nav" class="nav-item" type="button"><span class="nav-symbol">✳</span> Ask AI</button>
         <div class="side-section-title">SMART CATEGORIES</div>
         <nav id="category-nav" class="category-nav" aria-label="Email categories"></nav>
         <div class="sidebar-note">
@@ -45,7 +46,7 @@
 
       <main class="main-panel">
         <header class="topbar">
-          <div class="breadcrumb"><span class="breadcrumb-mark"></span><span>Inbox</span><span class="slash">/</span><span class="muted">Last 24 hours</span></div>
+          <div class="breadcrumb"><span class="breadcrumb-mark"></span><span id="page-title">Inbox</span><span id="page-context" class="slash">/ <span class="muted">Last 24 hours</span></span></div>
           <div class="top-actions">
             <span id="gmail-status" class="gmail-status">Connect Gmail to get started</span>
             <button id="sign-out" class="auth-toggle" type="button" hidden>Sign out</button>
@@ -53,7 +54,7 @@
           </div>
         </header>
 
-        <section class="dashboard-content">
+        <section id="inbox-view" class="dashboard-content">
           <div class="intro-row">
             <div>
               <div class="eyebrow">YOUR DAILY INBOX</div>
@@ -72,9 +73,8 @@
 
           <div class="section-heading">
             <div><div class="eyebrow">THE LAST 24 HOURS</div><h2>Your emails</h2></div>
-            <div class="sort-note"><span class="sort-dot"></span> Newest first <button id="model-diagnostic" class="model-test-button" type="button">Test model</button></div>
+            <div class="sort-note"><span class="sort-dot"></span> Newest first</div>
           </div>
-          <div id="model-diagnostic-result" class="model-test-result" role="status" aria-live="polite" hidden></div>
 
           <nav id="account-filters" class="account-filters" aria-label="Filter by Gmail account"></nav>
           <nav id="filter-tabs" class="filter-tabs" aria-label="Filter emails"></nav>
@@ -89,6 +89,58 @@
             <button id="empty-connect" class="empty-connect" type="button">Connect Gmail</button>
           </div>
           <footer class="privacy-note"><span>✳</span> Recent email details are cached securely for 24 hours. Gmail labels update automatically; full message content loads when opened.</footer>
+        </section>
+
+        <section id="ask-ai-view" class="ask-ai-page" aria-labelledby="ask-ai-title" hidden>
+          <div class="ask-ai-heading">
+            <div>
+              <div class="eyebrow">YOUR EMAIL ASSISTANT</div>
+              <h1 id="ask-ai-title">Ask your inbox.</h1>
+              <p>Ask a question about recent mail. Answers will include links back to the emails they came from.</p>
+            </div>
+            <div class="ask-ai-window"><span class="ask-ai-window-dot"></span> LAST 24 HOURS</div>
+          </div>
+
+          <div class="ask-ai-scope-row">
+            <div>
+              <span class="scope-caption">SEARCH IN</span>
+              <label class="scope-select-wrap" for="chat-account-scope">
+                <span aria-hidden="true">▤</span>
+                <select id="chat-account-scope" aria-label="Choose Gmail account for Ask AI">
+                  <option value="all">All connected accounts</option>
+                </select>
+                <span class="scope-chevron" aria-hidden="true">⌄</span>
+              </label>
+            </div>
+            <span class="scope-note">Only your saved email data will be searched.</span>
+          </div>
+
+          <div class="ask-ai-workspace">
+            <div class="ask-ai-thread" aria-live="polite">
+              <div id="ask-ai-empty" class="ask-ai-empty">
+                <div class="ask-ai-mark" aria-hidden="true">✳</div>
+                <h2>What would you like to find?</h2>
+                <p>Ask about a meeting, a request, or something you remember from an email.</p>
+                <div class="ask-ai-prompts" aria-label="Example questions">
+                  <button type="button" class="ask-ai-prompt" data-question="What needs my attention today?">What needs my attention today?</button>
+                  <button type="button" class="ask-ai-prompt" data-question="What dates or deadlines are in my emails?">Find dates and deadlines</button>
+                  <button type="button" class="ask-ai-prompt" data-question="What did the latest interview email ask me to bring?">What do I need to bring?</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="ask-ai-unavailable" role="status">
+              <span class="unavailable-mark">i</span>
+              <span>Ask AI searches saved email from the last 24 hours. Each answer can link back to the emails it used.</span>
+            </div>
+
+            <form id="ask-ai-composer" class="ask-ai-composer">
+              <label class="visually-hidden" for="ask-ai-input">Ask a question about your email</label>
+              <textarea id="ask-ai-input" rows="1" maxlength="500" placeholder="Ask about your recent emails…"></textarea>
+              <button type="submit" aria-label="Send question">↑</button>
+              <div class="composer-footer"><span>Answers will use your selected mailbox and recent email sources.</span><span>Enter to ask</span></div>
+            </form>
+          </div>
         </section>
       </main>
     </div>

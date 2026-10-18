@@ -16,8 +16,17 @@ const loadingState = document.querySelector("#loading-state");
 const loadError = document.querySelector("#load-error");
 const syncStatus = document.querySelector("#sync-status");
 const connectButton = document.querySelector("#connect-gmail");
-const modelDiagnosticButton = document.querySelector("#model-diagnostic");
-const modelDiagnosticResult = document.querySelector("#model-diagnostic-result");
+const inboxNav = document.querySelector("#inbox-nav");
+const askAiNav = document.querySelector("#ask-ai-nav");
+const inboxView = document.querySelector("#inbox-view");
+const askAiView = document.querySelector("#ask-ai-view");
+const chatAccountScope = document.querySelector("#chat-account-scope");
+const pageTitle = document.querySelector("#page-title");
+const pageContext = document.querySelector("#page-context");
+const askAiThread = document.querySelector("#ask-ai-empty").parentElement;
+const askAiComposer = document.querySelector("#ask-ai-composer");
+const askAiInput = document.querySelector("#ask-ai-input");
+const askAiSend = askAiComposer.querySelector('button[type="submit"]');
 const gmailStatus = document.querySelector("#gmail-status");
 const connectionNote = document.querySelector("#connection-note");
 const emailDialog = document.querySelector("#email-dialog");
@@ -25,6 +34,7 @@ const summaryDialog = document.querySelector("#summary-dialog");
 let emails = [];
 let gmailAccounts = [];
 let selectedEmail = null;
+let askAiHistory = [];
 let activeFilter = "All mail";
 let activeAccountFilter = "all";
 let supabaseClient = null;
@@ -90,6 +100,8 @@ async function initAppAuth() {
       if (userChanged) {
         emails = [];
         gmailAccounts = [];
+        resetAskAiChat();
+        showPage("inbox");
         activeFilter = "All mail";
         activeUserId = nextUserId;
         restoreAccountFilter(nextUserId);
@@ -173,39 +185,6 @@ async function apiFetch(path, options = {}) {
   return fetch(path, { ...options, headers });
 }
 
-async function testModelClassification() {
-  if (modelDiagnosticButton.disabled) return;
-  if (!currentSession) {
-    modelDiagnosticResult.hidden = false;
-    modelDiagnosticResult.className = "model-test-result has-error";
-    modelDiagnosticResult.textContent = "Your Today Mail sign-in session is missing. Sign out of Today Mail, sign back in, then try again.";
-    return;
-  }
-  modelDiagnosticButton.disabled = true;
-  modelDiagnosticButton.textContent = "Testing…";
-  modelDiagnosticResult.hidden = false;
-  modelDiagnosticResult.className = "model-test-result";
-  modelDiagnosticResult.textContent = "Sending three made-up emails to the model. Gmail and saved emails will not be changed.";
-  try {
-    const response = await apiFetch("/api/model/diagnostic", { method: "POST" });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.detail || "Could not test the model.");
-    const details = payload.diagnostics || {};
-    const assignments = Object.values(payload.assignments || {});
-    const labels = assignments.length ? ` Categories: ${assignments.join(", ")}.` : "";
-    modelDiagnosticResult.classList.add(payload.status === "success" ? "is-success" : "has-error");
-    modelDiagnosticResult.textContent = payload.status === "success"
-      ? `Model test passed: it returned a tool call and labeled ${details.assigned_count} of 3 sample emails in ${Math.round(payload.duration_ms / 1000)} seconds.${labels} No real email was changed.`
-      : `Model test did not complete: ${details.reason || "no valid structured assignments"}; tool calls: ${details.tool_call_count ?? 0}; finish reason: ${details.finish_reason || "unknown"}; output tokens: ${details.output_tokens ?? "unknown"}; labeled ${details.assigned_count ?? 0} of 3 sample emails. No real email was changed.`;
-  } catch (error) {
-    modelDiagnosticResult.classList.add("has-error");
-    modelDiagnosticResult.textContent = `${error.message || "Could not test the model."} No real email was changed.`;
-  } finally {
-    modelDiagnosticButton.disabled = false;
-    modelDiagnosticButton.textContent = "Test model";
-  }
-}
-
 async function updateGmailStatus() {
   if (!currentSession) return;
   try {
@@ -226,6 +205,7 @@ async function updateGmailStatus() {
         : `Connected as ${payload.email}`;
       setConnected(statusText);
       if (activeAccountFilter !== "all" && !gmailAccounts.some((account) => account.id === activeAccountFilter)) {
+        resetAskAiChat();
         activeAccountFilter = "all";
         rememberAccountFilter();
       }
@@ -291,7 +271,10 @@ async function disconnectGmailAccount(account, button) {
 
     gmailAccounts = gmailAccounts.filter((item) => item.id !== account.id);
     emails = emails.filter((email) => email.connection_id !== account.id);
-    if (activeAccountFilter === account.id) activeAccountFilter = "all";
+    if (activeAccountFilter === account.id) {
+      activeAccountFilter = "all";
+      resetAskAiChat();
+    }
     rememberAccountFilter();
     gmailConnected = gmailAccounts.length > 0;
     if (gmailConnected) {
@@ -435,7 +418,146 @@ function emailsForSelectedAccount() {
   return emails.filter((email) => email.connection_id === activeAccountFilter);
 }
 
+function showPage(page) {
+  const isAskAi = page === "ask-ai";
+  inboxView.hidden = isAskAi;
+  askAiView.hidden = !isAskAi;
+  inboxNav.classList.toggle("selected", !isAskAi);
+  askAiNav.classList.toggle("selected", isAskAi);
+  inboxNav.toggleAttribute("aria-current", !isAskAi);
+  askAiNav.toggleAttribute("aria-current", isAskAi);
+  pageTitle.textContent = isAskAi ? "Ask AI" : "Inbox";
+  pageContext.hidden = isAskAi;
+  if (isAskAi) renderAskAiAccountScope();
+}
+
+function addChatMessage(role, text, sources = []) {
+  const message = document.createElement("article");
+  message.className = `chat-message ${role === "user" ? "chat-message-user" : "chat-message-assistant"}`;
+  const speaker = document.createElement("div");
+  speaker.className = "chat-speaker";
+  speaker.textContent = role === "user" ? "YOU" : "TODAY MAIL AI";
+  const content = document.createElement("p");
+  content.textContent = text;
+  message.append(speaker, content);
+
+  if (sources.length) {
+    const sourceSection = document.createElement("div");
+    sourceSection.className = "chat-sources";
+    const title = document.createElement("div");
+    title.className = "chat-sources-title";
+    title.textContent = "FROM YOUR EMAIL";
+    sourceSection.append(title);
+    for (const source of sources) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "chat-source-card";
+      const subject = document.createElement("span");
+      subject.className = "chat-source-subject";
+      subject.textContent = source.subject || "(No subject)";
+      const details = document.createElement("span");
+      details.className = "chat-source-details";
+      details.textContent = [source.from || "Unknown sender", formatFullReceived(source.received)]
+        .filter(Boolean)
+        .join(" · ");
+      const openLabel = document.createElement("span");
+      openLabel.className = "chat-source-open";
+      openLabel.textContent = "Open email ↗";
+      button.append(subject, details, openLabel);
+      button.addEventListener("click", () => void openEmail(source));
+      sourceSection.append(button);
+    }
+    message.append(sourceSection);
+  }
+
+  askAiThread.append(message);
+  message.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  return message;
+}
+
+function resetAskAiChat() {
+  askAiThread.querySelectorAll(".chat-message").forEach((message) => message.remove());
+  document.querySelector("#ask-ai-empty").hidden = false;
+  askAiInput.value = "";
+  askAiHistory = [];
+  askAiSend.disabled = false;
+  askAiSend.textContent = "↑";
+}
+
+async function submitAskAiQuestion() {
+  const question = askAiInput.value.trim();
+  if (!question || askAiSend.disabled) return;
+  const requestUserId = activeUserId;
+  document.querySelector("#ask-ai-empty").hidden = true;
+  addChatMessage("user", question);
+  askAiInput.value = "";
+  askAiInput.style.height = "";
+  askAiSend.disabled = true;
+  const originalSendLabel = askAiSend.textContent;
+  askAiSend.textContent = "…";
+  const pending = addChatMessage("assistant", "Searching your recent email…");
+
+  try {
+    const response = await apiFetch("/api/dashboard/ask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        question,
+        connection_id: activeAccountFilter === "all" ? null : activeAccountFilter,
+        history: askAiHistory.slice(-6),
+      }),
+    });
+    const raw = await response.text();
+    let payload;
+    try {
+      payload = raw ? JSON.parse(raw) : {};
+    } catch {
+      throw new Error(`The server returned an unreadable response (HTTP ${response.status}).`);
+    }
+    if (!response.ok) throw new Error(payload.detail || "Could not answer from your recent email.");
+    pending.remove();
+    if (activeUserId !== requestUserId) return;
+    const answer = payload.answer || "I couldn't find an answer in those emails.";
+    addChatMessage("assistant", answer, payload.sources || []);
+    askAiHistory.push({ role: "user", content: question }, { role: "assistant", content: answer });
+  } catch (error) {
+    pending.remove();
+    if (activeUserId === requestUserId) {
+      addChatMessage("assistant", error.message || "Could not answer from your recent email.");
+    }
+  } finally {
+    if (activeUserId === requestUserId) {
+      askAiSend.disabled = false;
+      askAiSend.textContent = originalSendLabel;
+      askAiInput.focus();
+    }
+  }
+}
+
+function renderAskAiAccountScope() {
+  const options = [
+    { id: "all", email: "All connected accounts" },
+    ...gmailAccounts.map((account) => ({ id: account.id, email: account.email })),
+  ];
+  chatAccountScope.replaceChildren(...options.map((account) => {
+    const option = document.createElement("option");
+    option.value = account.id;
+    option.textContent = account.email;
+    return option;
+  }));
+  if (
+    gmailStatusChecked
+    && activeAccountFilter !== "all"
+    && !gmailAccounts.some((account) => account.id === activeAccountFilter)
+  ) {
+    activeAccountFilter = "all";
+    resetAskAiChat();
+  }
+  chatAccountScope.value = activeAccountFilter;
+}
+
 function renderAccountFilters() {
+  renderAskAiAccountScope();
   accountFilters.replaceChildren();
   if (!gmailAccounts.length) {
     accountFilters.hidden = true;
@@ -463,6 +585,7 @@ function renderAccountFilters() {
     label.textContent = account.email;
     button.append(dot, label);
     button.addEventListener("click", () => {
+      if (activeAccountFilter !== account.id) resetAskAiChat();
       activeAccountFilter = account.id;
       rememberAccountFilter();
       renderDashboard();
@@ -525,6 +648,7 @@ function renderFilters() {
       navItem.append(navIcon, navTitle, navCount);
       navItem.addEventListener("click", () => {
         activeFilter = name;
+        showPage("inbox");
         renderDashboard();
       });
       categoryNav.append(navItem);
@@ -770,10 +894,34 @@ async function summarizeEmail(email, button) {
 }
 
 connectButton.addEventListener("click", connectGmail);
+inboxNav.addEventListener("click", () => showPage("inbox"));
+askAiNav.addEventListener("click", () => showPage("ask-ai"));
+chatAccountScope.addEventListener("change", () => {
+  if (activeAccountFilter !== chatAccountScope.value) resetAskAiChat();
+  activeAccountFilter = chatAccountScope.value;
+  rememberAccountFilter();
+  renderDashboard();
+});
+document.querySelectorAll(".ask-ai-prompt").forEach((button) => {
+  button.addEventListener("click", () => {
+    const input = document.querySelector("#ask-ai-input");
+    input.value = button.dataset.question || "";
+    input.focus();
+  });
+});
+askAiComposer.addEventListener("submit", (event) => {
+  event.preventDefault();
+  void submitAskAiQuestion();
+});
+askAiInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    void submitAskAiQuestion();
+  }
+});
 document.querySelector("#empty-connect").addEventListener("click", connectGmail);
 document.querySelector("#close-email-dialog").addEventListener("click", () => emailDialog.close());
 document.querySelector("#hide-email-button").addEventListener("click", () => hideEmailFromApp());
-modelDiagnosticButton.addEventListener("click", testModelClassification);
 emailDialog.addEventListener("click", (event) => {
   if (event.target === emailDialog) emailDialog.close();
 });

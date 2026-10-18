@@ -96,67 +96,6 @@ def test_classify_batch_keeps_valid_assignments_when_some_are_missing_or_invalid
     assert runtime.classify_batch(emails) == {"mail-1": "Updates"}
 
 
-def test_synthetic_diagnostic_reports_missing_tool_call_without_touching_gmail(monkeypatch):
-    captured = {}
-
-    def fake_chat(messages, tools, **kwargs):
-        captured["payload"] = json.loads(messages[1]["content"])
-        captured["tools"] = tools
-        assert kwargs["include_diagnostics"] is True
-        return {"tool_calls": []}, {
-            "tool_call_count": 0,
-            "finish_reason": "stop",
-            "input_tokens": 120,
-            "output_tokens": 30,
-        }
-
-    def no_gmail(*args, **kwargs):
-        raise AssertionError("Diagnostic must not call Gmail")
-
-    monkeypatch.setattr(runtime, "chat", fake_chat)
-    monkeypatch.setattr(runtime, "apply_user_label", no_gmail)
-
-    result = runtime.run_model_classification_diagnostic()
-
-    assert result["status"] == "failed"
-    assert result["diagnostics"]["tool_call_count"] == 0
-    assert result["diagnostics"]["reason"] == "expected_category_tool_call_missing"
-    assert result["diagnostics"]["finish_reason"] == "stop"
-    assert result["diagnostics"]["input_tokens"] == 120
-    assert result["diagnostics"]["output_tokens"] == 30
-    assert len(captured["payload"]["emails"]) == 3
-    assert all(email["id"].startswith("diagnostic-") for email in captured["payload"]["emails"])
-    assert captured["tools"][0]["function"]["name"] == "return_email_categories"
-
-
-def test_synthetic_diagnostic_reports_successful_structured_assignments(monkeypatch):
-    def fake_chat(_messages, _tools, **kwargs):
-        assert kwargs["include_diagnostics"] is True
-        return {
-            "tool_calls": [{
-                "function": {
-                    "name": "return_email_categories",
-                    "arguments": json.dumps({
-                        "assignments": [
-                            {"email_id": "diagnostic-urgent-1", "category": "Urgent Action"},
-                            {"email_id": "diagnostic-info-2", "category": "Important Info"},
-                            {"email_id": "diagnostic-promo-3", "category": "Promotions"},
-                        ]
-                    }),
-                }
-            }]
-        }, {"tool_call_count": 1, "finish_reason": "tool_calls", "input_tokens": 200, "output_tokens": 80}
-
-    monkeypatch.setattr(runtime, "chat", fake_chat)
-
-    result = runtime.run_model_classification_diagnostic()
-
-    assert result["status"] == "success"
-    assert result["diagnostics"]["tool_call_count"] == 1
-    assert result["diagnostics"]["assigned_count"] == 3
-    assert result["assignments"]["diagnostic-promo-3"] == "Promotions"
-
-
 def test_runtime_saves_and_applies_only_the_assignments_returned(monkeypatch):
     emails = [{"id": f"mail-{index}"} for index in range(1, 4)]
     attempted = []

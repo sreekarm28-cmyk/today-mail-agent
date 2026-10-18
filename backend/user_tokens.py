@@ -514,6 +514,50 @@ def get_persistent_email_by_id(user_id: str, email_id: str) -> dict | None:
     }
 
 
+def search_recent_persistent_emails(
+    user_id: str,
+    query: str,
+    connection_id: str | None = None,
+    limit: int = 5,
+) -> list[dict]:
+    """Search the user's last 24 hours of saved mail with PostgreSQL full-text search."""
+    from .email_tool import normalize_email_body
+
+    started = perf_counter()
+    bounded_limit = max(1, min(int(limit), 5))
+    rows = _request(
+        "POST",
+        "rpc/search_recent_emails",
+        {
+            "p_user_id": user_id,
+            "p_query": query,
+            "p_connection_id": connection_id,
+            "p_limit": bounded_limit,
+        },
+    )
+    if not isinstance(rows, list):
+        raise RuntimeError("Supabase returned an invalid email search result.")
+
+    matches = []
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("id"):
+            continue
+        internal_date = int(row.get("internal_date") or 0)
+        received = datetime.fromtimestamp(internal_date / 1000, tz=timezone.utc)
+        matches.append({
+            "id": row["id"],
+            "connection_id": row.get("connection_id"),
+            "from": row.get("sender", ""),
+            "subject": row.get("subject", "(No subject)"),
+            "preview": row.get("snippet", ""),
+            "received": received.isoformat(timespec="minutes"),
+            "ai_label": row.get("ai_label"),
+            "body": normalize_email_body(row.get("body") or ""),
+        })
+    log_timing("chat.database_search", started, result_count=len(matches), limit=bounded_limit)
+    return matches
+
+
 def list_gmail_connections() -> list[dict[str, str]]:
     """List connected mailbox IDs and owners, without returning tokens."""
     rows = _request(

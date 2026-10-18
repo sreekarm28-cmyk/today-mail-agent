@@ -6,8 +6,9 @@ A small Gmail dashboard that shows messages from the last 24 hours, classifies t
 
 - **Frontend:** `frontend/` contains the dashboard.
 - **Backend:** `backend/` handles sign-in, Gmail, classification, summaries, and orchestration.
-- **Supabase:** app accounts, encrypted Gmail refresh tokens, and a 24-hour cache of email-list details. Full email bodies stay in Gmail and load only when opened or summarized.
-- **OpenRouter:** sends classification and summary requests to the configured model.
+- **Supabase:** app accounts, encrypted Gmail refresh tokens, saved email details, and readable email bodies. The dashboard and Ask AI read saved data from Supabase.
+- **Ask AI:** searches the signed-in user's saved emails from the last 24 hours, sends up to five relevant matches to the configured model, and returns links to source emails.
+- **OpenRouter:** sends classification, summary, and Ask AI requests to the configured model.
 - **GitHub Actions:** calls Render about every 30 minutes to classify new messages and refresh the cache, even when nobody has the dashboard open.
 - **Langfuse:** optional model-call tracing.
 - **Backend timing logs:** `APP_TIMING` entries show request-correlated durations for Gmail, Supabase, and model steps in the service logs.
@@ -52,12 +53,12 @@ Required for hosted Gmail and user accounts:
 
 Optional: `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, and `LANGFUSE_BASE_URL` (for Langfuse Cloud, `https://cloud.langfuse.com`).
 
-Run both SQL files in `supabase/migrations/` using the Supabase SQL Editor. Add `SCHEDULED_JOB_TOKEN` to Render and as a GitHub Actions repository secret; add `RENDER_APP_URL` as another repository secret. GitHub Actions calls `/api/internal/process-recent-emails` on its schedule. Scheduled runs can be delayed.
+To enable Ask AI, run `supabase/migrations/202610180001_recent_email_search.sql` once in the Supabase SQL Editor. Earlier migrations should not be rerun if they have already been applied. Add `SCHEDULED_JOB_TOKEN` to Render and as a GitHub Actions repository secret; add `RENDER_APP_URL` as another repository secret. GitHub Actions calls `/api/internal/process-recent-emails` on its schedule. Scheduled runs can be delayed.
 
 ## Privacy and limitations
 
 - Gmail access is granted through Google OAuth; the app never asks for a Gmail password.
-- The dashboard cache stores sender, subject, received time, preview, and labels for 24 hours. It does not store full email bodies.
+- Supabase stores saved email details and bodies. The dashboard and Ask AI show/search only the rolling last 24 hours; hidden or deleted emails are excluded.
 - Timing logs include request IDs, step names, durations, and counts; they do not include email text, email addresses, or tokens.
 - Langfuse is optional. Traces include model timings and token counts, not email bodies or summary text.
 - Google may require OAuth verification and a security assessment before a public release that uses Gmail's restricted `gmail.modify` scope.

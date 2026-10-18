@@ -7,10 +7,12 @@ import os
 from pathlib import Path
 import sys
 from time import perf_counter
-from uuid import uuid4
+from typing import Literal
+from uuid import UUID, uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, RedirectResponse, Response
+from pydantic import BaseModel, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -27,9 +29,9 @@ from .email_tool import (
 )
 from .runtime import (
     CLASSIFICATION_CATEGORIES,
+    answer_question_about_recent_emails,
     initial_sync_mailbox,
     process_scheduled_emails,
-    run_model_classification_diagnostic,
     summarize_one_email,
     sync_persistent_mailbox,
 )
@@ -70,6 +72,17 @@ limiter = Limiter(
 )
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+class AskInboxHistoryMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=1200)
+
+
+class AskInboxRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=500)
+    connection_id: UUID | None = None
+    history: list[AskInboxHistoryMessage] = Field(default_factory=list, max_length=6)
 
 
 @app.middleware("http")
@@ -477,37 +490,6 @@ def process_recent_emails_job(
     return result
 
 
-@app.post("/api/model/diagnostic")
-@limiter.shared_limit(f"{MODEL_REQUESTS_PER_MINUTE}/minute", scope="model-requests-per-minute")
-@limiter.shared_limit(f"{MODEL_REQUESTS_PER_DAY}/day", scope="model-requests-per-day")
-def model_classification_diagnostic(
-    request: Request,
-    user: dict | None = Depends(_require_app_user),
-) -> dict:
-    """Test OpenRouter's classification tool-call behavior with synthetic mail only."""
-    if not user:
-        raise HTTPException(status_code=401, detail="Sign in to test the model.")
-    started = perf_counter()
-    try:
-        result = run_model_classification_diagnostic()
-        log_timing(
-            "classification.synthetic_diagnostic",
-            started,
-            status=result["status"],
-            assigned_count=result["diagnostics"]["assigned_count"],
-            tool_call_count=result["diagnostics"]["tool_call_count"],
-        )
-        return result
-    except Exception as exc:
-        log_timing("classification.synthetic_diagnostic", started, status="error")
-        logger.error("Synthetic model diagnostic failed (%s).", type(exc).__name__)
-        request_id = getattr(request.state, "request_id", "unknown")
-        raise HTTPException(
-            status_code=502,
-            detail=f"The model diagnostic failed. Backend request ID: {request_id}.",
-        ) from exc
-
-
 @app.get("/api/dashboard/emails/{email_id}")
 def dashboard_email_details(email_id: str, user: dict | None = Depends(_require_app_user)) -> dict:
     """Read one full email body from Supabase, without calling Gmail or the model."""
@@ -570,5 +552,34 @@ def summarize_dashboard_email(
         log_timing("summary.total", started, status="error")
         logger.exception("Could not summarize dashboard email")
         raise HTTPException(status_code=400, detail="Something went wrong. Please try again.") from exc
+
+
+@app.post("/api/dashboard/ask")
+@limiter.shared_limit(f"{MODEL_REQUESTS_PER_MINUTE}/minute", scope="model-requests-per-minute")
+@limiter.shared_limit(f"{MODEL_REQUESTS_PER_DAY}/day", scope="model-requests-per-day")
+def ask_inbox(
+    payload: AskInboxRequest,
+    request: Request,
+    user: dict | None = Depends(_require_app_user),
+) -> dict:
+    """Answer one question from the user's recent saved email, with source links."""
+    if not user:
+        raise HTTPException(status_code=401, detail="Sign in to ask about your inbox.")
+    question = payload.question.strip()
+    if not question:
+        raise HTTPException(status_code=422, detail="Enter a question about your email.")
+    started = perf_counter()
+    try:
+        result = answer_question_about_recent_emails(
+            user["id"],
+            question,
+            connection_id=str(payload.connection_id) if payload.connection_id else None,
+            conversation=[item.model_dump() for item in payload.history],
+        )
+        return result
+    except Exception as exc:
+        log_timing("chat.request", started, status="error", error_type=type(exc).__name__)
+        logger.exception("Could not answer a question about saved email")
+        raise HTTPException(status_code=400, detail="Could not answer from your recent email. Please try again.") from exc
 
 

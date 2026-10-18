@@ -93,17 +93,8 @@
 
         <section id="ask-ai-view" class="ask-ai-page" aria-labelledby="ask-ai-title" hidden>
           <div class="ask-ai-heading">
-            <div>
-              <div class="eyebrow">YOUR EMAIL ASSISTANT</div>
-              <h1 id="ask-ai-title">Ask your inbox.</h1>
-              <p>Ask a question about recent mail. Answers will include links back to the emails they came from.</p>
-            </div>
-            <div class="ask-ai-window"><span class="ask-ai-window-dot"></span> LAST 24 HOURS</div>
-          </div>
-
-          <div class="ask-ai-scope-row">
-            <div>
-              <span class="scope-caption">SEARCH IN</span>
+            <h1 id="ask-ai-title">Ask your inbox<span>.</span></h1>
+            <div class="ask-ai-controls">
               <label class="scope-select-wrap" for="chat-account-scope">
                 <span aria-hidden="true">▤</span>
                 <select id="chat-account-scope" aria-label="Choose Gmail account for Ask AI">
@@ -111,16 +102,15 @@
                 </select>
                 <span class="scope-chevron" aria-hidden="true">⌄</span>
               </label>
+              <div class="ask-ai-window"><span class="ask-ai-window-dot"></span> 24H</div>
             </div>
-            <span class="scope-note">Only your saved email data will be searched.</span>
           </div>
 
           <div class="ask-ai-workspace">
             <div class="ask-ai-thread" aria-live="polite">
               <div id="ask-ai-empty" class="ask-ai-empty">
                 <div class="ask-ai-mark" aria-hidden="true">✳</div>
-                <h2>What would you like to find?</h2>
-                <p>Ask about a meeting, a request, or something you remember from an email.</p>
+                <h2>What do you want to know?</h2>
                 <div class="ask-ai-prompts" aria-label="Example questions">
                   <button type="button" class="ask-ai-prompt" data-question="What needs my attention today?">What needs my attention today?</button>
                   <button type="button" class="ask-ai-prompt" data-question="What dates or deadlines are in my emails?">Find dates and deadlines</button>
@@ -129,16 +119,10 @@
               </div>
             </div>
 
-            <div class="ask-ai-unavailable" role="status">
-              <span class="unavailable-mark">i</span>
-              <span>Ask AI searches saved email from the last 24 hours. Each answer can link back to the emails it used.</span>
-            </div>
-
             <form id="ask-ai-composer" class="ask-ai-composer">
               <label class="visually-hidden" for="ask-ai-input">Ask a question about your email</label>
               <textarea id="ask-ai-input" rows="1" maxlength="500" placeholder="Ask about your recent emails…"></textarea>
               <button type="submit" aria-label="Send question">↑</button>
-              <div class="composer-footer"><span>Answers will use your selected mailbox and recent email sources.</span><span>Enter to ask</span></div>
             </form>
           </div>
         </section>

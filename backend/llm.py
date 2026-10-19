@@ -60,6 +60,9 @@ def chat(
         "messages": messages,
         "temperature": 0.2,
         "max_tokens": max_tokens,
+        # The free Nemotron endpoint supports the OpenRouter reasoning control.
+        # Disable extra thinking tokens so the model has room to return its tool call.
+        "reasoning": {"enabled": False},
         "stream": False,
     }
     if tools:
@@ -111,11 +114,13 @@ def chat(
             choice = choices[0]
             message = choice["message"]
             usage = result.get("usage") or {}
+            completion_details = usage.get("completion_tokens_details") or {}
             content = message.get("content")
             diagnostics = {
                 "finish_reason": choice.get("finish_reason") or "unknown",
                 "output_tokens": usage.get("completion_tokens"),
                 "input_tokens": usage.get("prompt_tokens"),
+                "reasoning_tokens": completion_details.get("reasoning_tokens"),
                 "content_type": type(content).__name__ if content is not None else "null",
                 "content_present": bool(content),
                 "refusal_present": bool(message.get("refusal")),
@@ -153,6 +158,8 @@ def chat(
                 metadata["input_tokens"] = usage["prompt_tokens"]
             if usage.get("completion_tokens") is not None:
                 metadata["output_tokens"] = usage["completion_tokens"]
+            if diagnostics["reasoning_tokens"] is not None:
+                metadata["reasoning_tokens"] = diagnostics["reasoning_tokens"]
             if usage.get("cost") is not None:
                 metadata["cost_usd"] = usage["cost"]
             record_metadata(span, **metadata)
@@ -162,6 +169,7 @@ def chat(
                 model=OPENROUTER_MODEL,
                 input_tokens=diagnostics["input_tokens"],
                 output_tokens=diagnostics["output_tokens"],
+                reasoning_tokens=diagnostics["reasoning_tokens"],
                 tool_count=len(tools),
                 tool_call_count=len(tool_calls),
                 finish_reason=diagnostics["finish_reason"],

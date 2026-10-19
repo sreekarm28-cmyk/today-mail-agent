@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import re
 from time import perf_counter
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -20,6 +21,22 @@ OPENROUTER_URL = os.getenv(
 OPENROUTER_MODEL = os.getenv(
     "OPENROUTER_MODEL", "nvidia/nemotron-3.5-lightning:free"
 )
+
+
+def _safe_response_preview(content: object, *, limit: int = 240) -> str:
+    """Return a short, redacted diagnostic excerpt without reasoning blocks."""
+    if not isinstance(content, str):
+        return "<non-text response>"
+
+    preview = re.sub(r"<think\b[^>]*>.*?(?:</think\s*>|$)", "[reasoning omitted]", content, flags=re.IGNORECASE | re.DOTALL)
+    preview = re.sub(r"https?://\S+|www\.\S+", "[URL]", preview, flags=re.IGNORECASE)
+    preview = re.sub(r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b", "[email]", preview)
+    preview = re.sub(r"(?<!\w)\+?\d[\d() .-]{7,}\d(?!\w)", "[number]", preview)
+    preview = re.sub(r"\b\d{6,}\b", "[number]", preview)
+    preview = " ".join(preview.split())
+    if len(preview) > limit:
+        preview = preview[:limit] + "…"
+    return preview
 
 
 def chat(
@@ -113,6 +130,25 @@ def chat(
                 "content_present": diagnostics["content_present"],
                 "refusal_present": diagnostics["refusal_present"],
             }
+            tool_calls = message.get("tool_calls") or []
+            tool_names = []
+            for call in tool_calls:
+                if not isinstance(call, dict):
+                    continue
+                function = call.get("function")
+                name = function.get("name") if isinstance(function, dict) else None
+                tool_names.append(str(name or "unknown")[:80])
+            expected_tool_name = None
+            if isinstance(tool_choice, dict):
+                expected_function = tool_choice.get("function")
+                if isinstance(expected_function, dict):
+                    expected_tool_name = expected_function.get("name")
+            content_text = content if isinstance(content, str) else ""
+            needs_response_diagnostic = (
+                len(tool_calls) != 1
+                or (expected_tool_name is not None and tool_names != [expected_tool_name])
+                or diagnostics["finish_reason"] == "length"
+            )
             if usage.get("prompt_tokens") is not None:
                 metadata["input_tokens"] = usage["prompt_tokens"]
             if usage.get("completion_tokens") is not None:
@@ -126,8 +162,33 @@ def chat(
                 model=OPENROUTER_MODEL,
                 input_tokens=diagnostics["input_tokens"],
                 output_tokens=diagnostics["output_tokens"],
-                tool_call_count=metadata["tool_call_count"],
+                tool_count=len(tools),
+                tool_call_count=len(tool_calls),
+                finish_reason=diagnostics["finish_reason"],
+                content_chars=len(content_text),
             )
+            if needs_response_diagnostic:
+                logger.warning(
+                    "MODEL_RESPONSE_DIAGNOSTIC %s",
+                    json.dumps(
+                        {
+                            "request_id": current_request_id(),
+                            "model": OPENROUTER_MODEL,
+                            "finish_reason": diagnostics["finish_reason"],
+                            "tool_count": len(tools),
+                            "tool_call_count": len(tool_calls),
+                            "tool_names": tool_names,
+                            "expected_tool_name": expected_tool_name,
+                            "content_chars": len(content_text),
+                            "reasoning_marker_present": bool(
+                                re.search(r"<think\b", content_text, flags=re.IGNORECASE)
+                            ),
+                            "preview": _safe_response_preview(content),
+                        },
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                )
             if include_diagnostics:
                 return message, diagnostics
             return message

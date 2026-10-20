@@ -126,7 +126,7 @@ button:disabled { cursor: wait; opacity: .58; }
 .sync-status.has-error { border-color: #f0d3ce; background: #fff4f1; color: #a74e43; }
 
 .email-list { display: grid; gap: 8px; }
-.email-card { display: grid; grid-template-columns: 34px minmax(0,1fr); gap: 12px; padding: 15px 17px 13px; border: 1px solid #e9e7e5; border-radius: 13px; background: #fff; box-shadow: 0 2px 7px #38304404; transition: border .16s,transform .16s,box-shadow .16s; animation: fade-in .18s ease-out; }
+.email-card { display: grid; grid-template-columns: 34px minmax(0,1fr); gap: 12px; padding: 15px 17px 13px; border: 1px solid #e9e7e5; border-radius: 13px; background: #fff; box-shadow: 0 2px 7px #38304404; transition: border .16s,transform .16s,box-shadow .16s; animation: fade-in .18s ease-out; cursor: pointer; }
 .email-card:hover { transform: translateY(-1px); border-color: #ddd6ec; box-shadow: 0 7px 18px #3830440b; }
 @keyframes fade-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
 .sender-avatar { width: 33px; height: 33px; display: grid; place-items: center; border-radius: 11px; background: #efeafd; color: #6550b4; font: 700 10px Manrope,sans-serif; }

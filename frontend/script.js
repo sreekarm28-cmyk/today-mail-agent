@@ -930,6 +930,11 @@ function renderEmail(email) {
   const card = document.createElement("article");
   card.className = "email-card";
   card.dataset.emailId = email.id;
+  card.title = "Open email";
+  card.addEventListener("click", (event) => {
+    if (event.target.closest("button, a, input, select, textarea")) return;
+    void openEmail(email);
+  });
   const avatar = document.createElement("div");
   avatar.className = "sender-avatar";
   avatar.textContent = initials(email.from);
@@ -1061,7 +1066,8 @@ function renderDashboard() {
 async function openEmail(email) {
   selectedEmail = email;
   replyOpenButton.disabled = true;
-  remindEmailButton.disabled = true;
+  // A reminder only needs the saved email ID; it should not wait for body loading.
+  remindEmailButton.disabled = !email?.id;
   composeDialog.close();
   document.querySelector("#email-dialog-subject").textContent = email.subject || "Email";
   document.querySelector("#email-dialog-from").textContent = email.from || "Unknown sender";
@@ -1093,7 +1099,6 @@ async function openEmail(email) {
     document.querySelector("#email-dialog-received").textContent = formatFullReceived(payload.received);
     body.textContent = payload.body || "(No readable text body available.)";
     replyOpenButton.disabled = false;
-    remindEmailButton.disabled = false;
   } catch (error) {
     body.textContent = error.message || "Could not open this email.";
   }

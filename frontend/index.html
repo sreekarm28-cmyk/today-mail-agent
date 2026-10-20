@@ -34,6 +34,7 @@
         <div class="sidebar-caption">YOUR MAILSPACE</div>
         <button id="inbox-nav" class="nav-item selected" type="button" aria-current="page"><span class="nav-symbol">▤</span> Inbox <span id="sidebar-count" class="nav-count">0</span></button>
         <button id="ask-ai-nav" class="nav-item" type="button"><span class="nav-symbol">✳</span> Ask AI</button>
+        <button id="reminders-nav" class="nav-item" type="button"><span class="nav-symbol">◷</span> Reminders <span id="reminders-count" class="nav-count" hidden>0</span></button>
         <div class="side-section-title">SMART CATEGORIES</div>
         <nav id="category-nav" class="category-nav" aria-label="Email categories"></nav>
         <div class="sidebar-note">
@@ -126,6 +127,20 @@
             </form>
           </div>
         </section>
+
+        <section id="reminders-view" class="dashboard-content reminders-page" aria-labelledby="reminders-title" hidden>
+          <div class="reminders-heading">
+            <div><div class="eyebrow">A NOTE FOR LATER</div><h1 id="reminders-title">Reminders<span>.</span></h1><p>Keep an email close until the time is right.</p></div>
+            <div class="reminder-clock" aria-hidden="true">◷</div>
+          </div>
+          <nav class="reminder-tabs" aria-label="Reminder status">
+            <button type="button" class="reminder-tab selected" data-reminder-tab="upcoming">Upcoming <span id="upcoming-count">0</span></button>
+            <button type="button" class="reminder-tab" data-reminder-tab="past">Past <span id="past-count">0</span></button>
+          </nav>
+          <div id="reminders-status" class="inline-message" role="status" aria-live="polite" hidden></div>
+          <div id="reminders-list" class="reminders-list" aria-live="polite"></div>
+          <div id="reminders-empty" class="reminders-empty" hidden><span>◷</span><h2>No reminders here</h2><p>Open an email and choose “Remind me” to save it for later.</p></div>
+        </section>
       </main>
     </div>
 
@@ -141,6 +156,7 @@
       <div class="email-dialog-footer">
         <span>Email content is shown as readable text from Gmail.</span>
         <button id="reply-open" class="reply-open-button" type="button" disabled>Reply</button>
+        <button id="remind-email" class="reply-secondary-button" type="button" disabled>Remind me</button>
         <button id="hide-email-button" class="hide-email-button" type="button">Remove from app</button>
       </div>
     </dialog>
@@ -181,6 +197,18 @@
       <div class="dialog-top"><div><span class="dialog-kicker">MAIL SUMMARY</span><h2 id="dialog-subject">Email summary</h2></div><button id="close-dialog" class="close-dialog" type="button" aria-label="Close summary">×</button></div>
       <div id="dialog-summary" class="dialog-summary"></div>
       <div class="dialog-footer">Check the original email for important details.</div>
+    </dialog>
+    <dialog id="reminder-dialog" class="summary-dialog reminder-dialog" aria-labelledby="reminder-dialog-title">
+      <div class="dialog-top"><div><span class="dialog-kicker">SAVE FOR LATER</span><h2 id="reminder-dialog-title">Remind me about this email</h2></div><button id="close-reminder-dialog" class="close-dialog" type="button" aria-label="Close reminder form">×</button></div>
+      <form id="reminder-form" class="reminder-form">
+        <p id="reminder-email-subject" class="reminder-email-subject"></p>
+        <label for="reminder-at">Date and time</label>
+        <input id="reminder-at" name="remind_at" type="datetime-local" required>
+        <label for="reminder-note">Note <span>optional</span></label>
+        <textarea id="reminder-note" name="note" rows="3" maxlength="500" placeholder="What should you remember?"></textarea>
+        <div id="reminder-form-status" class="reply-status" role="status" aria-live="polite" hidden></div>
+        <div class="reminder-form-actions"><button id="cancel-reminder" class="reply-secondary-button" type="button">Cancel</button><button id="save-reminder" class="reply-open-button" type="submit">Save reminder</button></div>
+      </form>
     </dialog>
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <script src="/script.js" defer></script>

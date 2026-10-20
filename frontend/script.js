@@ -18,8 +18,10 @@ const syncStatus = document.querySelector("#sync-status");
 const connectButton = document.querySelector("#connect-gmail");
 const inboxNav = document.querySelector("#inbox-nav");
 const askAiNav = document.querySelector("#ask-ai-nav");
+const remindersNav = document.querySelector("#reminders-nav");
 const inboxView = document.querySelector("#inbox-view");
 const askAiView = document.querySelector("#ask-ai-view");
+const remindersView = document.querySelector("#reminders-view");
 const chatAccountScope = document.querySelector("#chat-account-scope");
 const pageTitle = document.querySelector("#page-title");
 const pageContext = document.querySelector("#page-context");
@@ -38,9 +40,21 @@ const composeDraftArea = document.querySelector("#compose-draft-area");
 const composeGenerateButton = document.querySelector("#compose-generate");
 const composeSendButton = document.querySelector("#compose-send");
 const composeScheduleControls = document.querySelector("#compose-schedule-controls");
+const remindEmailButton = document.querySelector("#remind-email");
+const reminderDialog = document.querySelector("#reminder-dialog");
+const reminderForm = document.querySelector("#reminder-form");
+const reminderAtInput = document.querySelector("#reminder-at");
+const reminderNoteInput = document.querySelector("#reminder-note");
+const reminderList = document.querySelector("#reminders-list");
+const remindersStatus = document.querySelector("#reminders-status");
+const reminderFormStatus = document.querySelector("#reminder-form-status");
 let emails = [];
 let gmailAccounts = [];
+let reminders = [];
 let selectedEmail = null;
+let reminderEditingId = null;
+let activeReminderTab = "upcoming";
+let remindersLoaded = false;
 let composeMode = "new";
 let composeReplyEmail = null;
 let askAiHistory = [];
@@ -109,6 +123,8 @@ async function initAppAuth() {
       if (userChanged) {
         emails = [];
         gmailAccounts = [];
+        reminders = [];
+        remindersLoaded = false;
         resetAskAiChat();
         showPage("inbox");
         activeFilter = "All mail";
@@ -397,6 +413,7 @@ async function syncEmails() {
 async function startDashboard(userId) {
   if (dashboardLoadedUserId === userId) return;
   dashboardLoadedUserId = userId;
+  void loadReminders();
   loadingState.hidden = false;
   emptyState.hidden = true;
   syncStatus.hidden = false;
@@ -419,6 +436,10 @@ async function startDashboard(userId) {
       if (document.visibilityState === "visible" && Date.now() - lastSyncAt > AUTO_SYNC_INTERVAL_MS) {
         void syncEmails();
       }
+      if (document.visibilityState === "visible" && !remindersView.hidden && remindersLoaded) {
+        renderReminders();
+        void loadReminders();
+      }
     });
   }
 }
@@ -439,15 +460,224 @@ function emailsForSelectedAccount() {
 
 function showPage(page) {
   const isAskAi = page === "ask-ai";
-  inboxView.hidden = isAskAi;
+  const isReminders = page === "reminders";
+  inboxView.hidden = isAskAi || isReminders;
   askAiView.hidden = !isAskAi;
-  inboxNav.classList.toggle("selected", !isAskAi);
+  remindersView.hidden = !isReminders;
+  inboxNav.classList.toggle("selected", !isAskAi && !isReminders);
   askAiNav.classList.toggle("selected", isAskAi);
-  inboxNav.toggleAttribute("aria-current", !isAskAi);
+  remindersNav.classList.toggle("selected", isReminders);
+  inboxNav.toggleAttribute("aria-current", !isAskAi && !isReminders);
   askAiNav.toggleAttribute("aria-current", isAskAi);
-  pageTitle.textContent = isAskAi ? "Ask AI" : "Inbox";
-  pageContext.hidden = isAskAi;
+  remindersNav.toggleAttribute("aria-current", isReminders);
+  pageTitle.textContent = isAskAi ? "Ask AI" : isReminders ? "Reminders" : "Inbox";
+  pageContext.hidden = isAskAi || isReminders;
   if (isAskAi) renderAskAiAccountScope();
+  if (isReminders) void loadReminders();
+}
+
+window.setInterval(() => {
+  if (document.visibilityState === "visible" && !remindersView.hidden && remindersLoaded) renderReminders();
+}, 30 * 1000);
+
+function setReminderStatus(element, message, isError = false) {
+  element.textContent = message;
+  element.classList.toggle("error", isError);
+  element.hidden = !message;
+}
+
+async function reminderRequest(path, options = {}) {
+  const response = await apiFetch(path, {
+    ...options,
+    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+  });
+  const text = await response.text();
+  let payload = {};
+  try { payload = text ? JSON.parse(text) : {}; } catch { /* Use a safe fallback below. */ }
+  if (!response.ok) throw new Error(payload.detail || "Could not update reminders. Please try again.");
+  return payload;
+}
+
+async function loadReminders() {
+  if (!currentSession) return;
+  setReminderStatus(remindersStatus, "Loading reminders…");
+  try {
+    const payload = await reminderRequest("/api/dashboard/reminders");
+    reminders = Array.isArray(payload.reminders) ? payload.reminders : [];
+    remindersLoaded = true;
+    renderReminders();
+    setReminderStatus(remindersStatus, "");
+  } catch (error) {
+    setReminderStatus(remindersStatus, error.message || "Could not load reminders.", true);
+  }
+}
+
+function renderReminders() {
+  const now = Date.now();
+  const upcoming = reminders.filter((item) => new Date(item.remind_at).getTime() > now);
+  const past = reminders.filter((item) => new Date(item.remind_at).getTime() <= now);
+  document.querySelector("#upcoming-count").textContent = String(upcoming.length);
+  document.querySelector("#past-count").textContent = String(past.length);
+  const count = upcoming.length + past.length;
+  const badge = document.querySelector("#reminders-count");
+  badge.textContent = String(count);
+  badge.hidden = count === 0;
+  const shown = activeReminderTab === "upcoming" ? upcoming : past;
+  reminderList.replaceChildren(...shown.map((item) => makeReminderCard(item, activeReminderTab === "past")));
+  reminderList.hidden = shown.length === 0;
+  document.querySelector("#reminders-empty").hidden = shown.length > 0;
+}
+
+function makeReminderCard(reminder, isPast) {
+  const card = document.createElement("article");
+  card.className = `reminder-card${isPast ? " is-past" : ""}`;
+  const mark = document.createElement("span");
+  mark.className = "reminder-card-mark";
+  mark.textContent = isPast ? "!" : "◷";
+  const content = document.createElement("div");
+  content.className = "reminder-card-content";
+  const date = document.createElement("div");
+  date.className = "reminder-card-date";
+  date.textContent = isPast
+    ? `Due ${formatFullReceived(reminder.remind_at)}`
+    : formatFullReceived(reminder.remind_at);
+  const subject = document.createElement("h2");
+  subject.textContent = reminder.subject || "Email no longer available";
+  const sender = document.createElement("p");
+  sender.className = "reminder-card-sender";
+  sender.textContent = reminder.sender || "";
+  content.append(date, subject, sender);
+  if (reminder.note) {
+    const note = document.createElement("p");
+    note.className = "reminder-card-note";
+    note.textContent = reminder.note;
+    content.append(note);
+  }
+  const actions = document.createElement("div");
+  actions.className = "reminder-card-actions";
+  if (reminder.email_available) {
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "reminder-action-link";
+    open.textContent = "Open email";
+    open.addEventListener("click", () => {
+      const email = emails.find((item) => item.id === reminder.email_id) || {
+        id: reminder.email_id,
+        subject: reminder.subject,
+        from: reminder.sender,
+        received: reminder.received,
+      };
+      void openEmail(email);
+    });
+    actions.append(open);
+  }
+  if (isPast) {
+    const again = document.createElement("button");
+    again.type = "button";
+    again.className = "reminder-action-link";
+    again.textContent = "Remind me again";
+    again.addEventListener("click", () => openReminderForm(null, reminder));
+    actions.append(again);
+  } else {
+    const done = document.createElement("button");
+    done.type = "button";
+    done.className = "reminder-action-link";
+    done.textContent = "Mark done";
+    done.addEventListener("click", () => void completeReminder(reminder.id, done));
+    actions.append(done);
+    const change = document.createElement("button");
+    change.type = "button";
+    change.className = "reminder-action-link";
+    change.textContent = "Change time";
+    change.addEventListener("click", () => openReminderForm(null, reminder));
+    actions.append(change);
+  }
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "reminder-delete-button";
+  remove.textContent = "Delete";
+  remove.addEventListener("click", () => void deleteReminder(reminder.id, remove));
+  actions.append(remove);
+  card.append(mark, content, actions);
+  return card;
+}
+
+function toLocalDateTimeInput(value) {
+  const date = value ? new Date(value) : new Date(Date.now() + 60 * 60 * 1000);
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+}
+
+function openReminderForm(email = selectedEmail, existing = null) {
+  if (!email && !existing) return;
+  reminderEditingId = existing?.id || null;
+  reminderForm.reset();
+  reminderAtInput.min = toLocalDateTimeInput(new Date(Date.now() + 2 * 60 * 1000).toISOString());
+  reminderAtInput.value = toLocalDateTimeInput(existing?.remind_at);
+  reminderNoteInput.value = existing?.note || "";
+  document.querySelector("#reminder-dialog-title").textContent = existing ? "Change reminder" : "Remind me about this email";
+  document.querySelector("#save-reminder").textContent = existing ? "Save changes" : "Save reminder";
+  document.querySelector("#reminder-email-subject").textContent = existing?.subject || email?.subject || "Selected email";
+  reminderForm.dataset.emailId = existing?.email_id || email?.id || "";
+  setReminderStatus(reminderFormStatus, "");
+  if (!reminderDialog.open) reminderDialog.showModal();
+}
+
+async function submitReminder(event) {
+  event.preventDefault();
+  const localValue = reminderAtInput.value;
+  if (!localValue) return;
+  const remindAt = new Date(localValue);
+  if (Number.isNaN(remindAt.getTime()) || remindAt.getTime() <= Date.now()) {
+    setReminderStatus(reminderFormStatus, "Choose a future date and time.", true);
+    return;
+  }
+  const button = document.querySelector("#save-reminder");
+  button.disabled = true;
+  setReminderStatus(reminderFormStatus, "Saving…");
+  try {
+    const body = { remind_at: remindAt.toISOString(), note: reminderNoteInput.value.trim() };
+    if (reminderEditingId) {
+      await reminderRequest(`/api/dashboard/reminders/${encodeURIComponent(reminderEditingId)}`, {
+        method: "PATCH", body: JSON.stringify(body),
+      });
+    } else {
+      await reminderRequest("/api/dashboard/reminders", {
+        method: "POST", body: JSON.stringify({ ...body, email_id: reminderForm.dataset.emailId }),
+      });
+    }
+    reminderDialog.close();
+    activeReminderTab = "upcoming";
+    document.querySelectorAll(".reminder-tab").forEach((tab) => tab.classList.toggle("selected", tab.dataset.reminderTab === activeReminderTab));
+    await loadReminders();
+  } catch (error) {
+    setReminderStatus(reminderFormStatus, error.message || "Could not save this reminder.", true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function completeReminder(id, button) {
+  button.disabled = true;
+  try {
+    await reminderRequest(`/api/dashboard/reminders/${encodeURIComponent(id)}/complete`, { method: "POST" });
+    reminders = reminders.filter((item) => item.id !== id);
+    renderReminders();
+  } catch (error) {
+    button.disabled = false;
+    setReminderStatus(remindersStatus, error.message || "Could not complete reminder.", true);
+  }
+}
+
+async function deleteReminder(id, button) {
+  button.disabled = true;
+  try {
+    await reminderRequest(`/api/dashboard/reminders/${encodeURIComponent(id)}`, { method: "DELETE" });
+    reminders = reminders.filter((item) => item.id !== id);
+    renderReminders();
+  } catch (error) {
+    button.disabled = false;
+    setReminderStatus(remindersStatus, error.message || "Could not delete reminder.", true);
+  }
 }
 
 function addChatMessage(role, text, sources = []) {
@@ -831,6 +1061,7 @@ function renderDashboard() {
 async function openEmail(email) {
   selectedEmail = email;
   replyOpenButton.disabled = true;
+  remindEmailButton.disabled = true;
   composeDialog.close();
   document.querySelector("#email-dialog-subject").textContent = email.subject || "Email";
   document.querySelector("#email-dialog-from").textContent = email.from || "Unknown sender";
@@ -862,6 +1093,7 @@ async function openEmail(email) {
     document.querySelector("#email-dialog-received").textContent = formatFullReceived(payload.received);
     body.textContent = payload.body || "(No readable text body available.)";
     replyOpenButton.disabled = false;
+    remindEmailButton.disabled = false;
   } catch (error) {
     body.textContent = error.message || "Could not open this email.";
   }
@@ -1105,6 +1337,21 @@ async function summarizeEmail(email, button) {
 connectButton.addEventListener("click", connectGmail);
 inboxNav.addEventListener("click", () => showPage("inbox"));
 askAiNav.addEventListener("click", () => showPage("ask-ai"));
+remindersNav.addEventListener("click", () => showPage("reminders"));
+document.querySelectorAll(".reminder-tab").forEach((tab) => {
+  tab.addEventListener("click", () => {
+    activeReminderTab = tab.dataset.reminderTab;
+    document.querySelectorAll(".reminder-tab").forEach((item) => item.classList.toggle("selected", item === tab));
+    renderReminders();
+  });
+});
+remindEmailButton.addEventListener("click", () => openReminderForm());
+reminderForm.addEventListener("submit", (event) => void submitReminder(event));
+document.querySelector("#close-reminder-dialog").addEventListener("click", () => reminderDialog.close());
+document.querySelector("#cancel-reminder").addEventListener("click", () => reminderDialog.close());
+reminderDialog.addEventListener("click", (event) => {
+  if (event.target === reminderDialog) reminderDialog.close();
+});
 chatAccountScope.addEventListener("change", () => {
   if (activeAccountFilter !== chatAccountScope.value) resetAskAiChat();
   activeAccountFilter = chatAccountScope.value;

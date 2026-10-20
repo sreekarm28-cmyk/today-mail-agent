@@ -6,7 +6,7 @@ import logging
 import os
 from pathlib import Path
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from time import perf_counter
 from typing import Literal
 from uuid import UUID, uuid4
@@ -51,6 +51,12 @@ from .user_tokens import (
     hide_persistent_email,
     get_persistent_email_by_id,
     get_persistent_emails,
+    get_reminder_email,
+    create_user_reminder,
+    list_user_reminders,
+    update_user_reminder,
+    complete_user_reminder,
+    delete_user_reminder,
     list_user_gmail_connections,
     save_gmail_connection,
 )
@@ -122,6 +128,17 @@ class ComposeMessageRequest(BaseModel):
 
 class ScheduledMessageRequest(ComposeMessageRequest):
     send_at: datetime
+
+
+class ReminderCreateRequest(BaseModel):
+    email_id: UUID
+    remind_at: datetime
+    note: str = Field(default="", max_length=500)
+
+
+class ReminderUpdateRequest(BaseModel):
+    remind_at: datetime
+    note: str = Field(default="", max_length=500)
 
 
 @app.middleware("http")
@@ -616,6 +633,114 @@ def hide_dashboard_email(email_id: str, user: dict | None = Depends(_require_app
     except Exception as exc:
         logger.exception("Could not hide dashboard email")
         raise HTTPException(status_code=400, detail="Could not remove this email. Please try again.") from exc
+
+
+@app.get("/api/dashboard/reminders")
+def dashboard_reminders(user: dict | None = Depends(_require_app_user)) -> dict[str, list[dict]]:
+    """Return incomplete reminders belonging to the signed-in user."""
+    if not user:
+        raise HTTPException(status_code=401, detail="Sign in to view reminders.")
+    try:
+        return {"reminders": list_user_reminders(user["id"])}
+    except Exception as exc:
+        logger.exception("Could not load reminders")
+        raise HTTPException(status_code=400, detail="Could not load reminders. Please try again.") from exc
+
+
+@app.post("/api/dashboard/reminders")
+def create_dashboard_reminder(
+    payload: ReminderCreateRequest,
+    user: dict | None = Depends(_require_app_user),
+) -> dict:
+    """Create a reminder for an email in this user's saved inbox."""
+    if not user:
+        raise HTTPException(status_code=401, detail="Sign in to create a reminder.")
+    if payload.remind_at.tzinfo is None or payload.remind_at.utcoffset() is None:
+        raise HTTPException(status_code=422, detail="Choose a date and time with a time zone.")
+    if payload.remind_at <= datetime.now(payload.remind_at.tzinfo):
+        raise HTTPException(status_code=422, detail="Choose a future date and time.")
+    try:
+        if not get_reminder_email(user["id"], str(payload.email_id)):
+            raise HTTPException(status_code=404, detail="Email not found in your app inbox.")
+        return create_user_reminder(
+            user["id"],
+            str(payload.email_id),
+            payload.remind_at.astimezone(timezone.utc).isoformat(),
+            payload.note.strip(),
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Could not create reminder")
+        raise HTTPException(status_code=400, detail="Could not create reminder. Please try again.") from exc
+
+
+@app.patch("/api/dashboard/reminders/{reminder_id}")
+def update_dashboard_reminder(
+    reminder_id: UUID,
+    payload: ReminderUpdateRequest,
+    user: dict | None = Depends(_require_app_user),
+) -> dict[str, str]:
+    """Change the time or note on one of this user's incomplete reminders."""
+    if not user:
+        raise HTTPException(status_code=401, detail="Sign in to update reminders.")
+    if payload.remind_at.tzinfo is None or payload.remind_at.utcoffset() is None:
+        raise HTTPException(status_code=422, detail="Choose a date and time with a time zone.")
+    if payload.remind_at <= datetime.now(payload.remind_at.tzinfo):
+        raise HTTPException(status_code=422, detail="Choose a future date and time.")
+    try:
+        updated = update_user_reminder(
+            user["id"],
+            str(reminder_id),
+            payload.remind_at.astimezone(timezone.utc).isoformat(),
+            payload.note.strip(),
+        )
+        if not updated:
+            raise HTTPException(status_code=404, detail="Reminder not found.")
+        return {"status": "updated"}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Could not update reminder")
+        raise HTTPException(status_code=400, detail="Could not update reminder. Please try again.") from exc
+
+
+@app.post("/api/dashboard/reminders/{reminder_id}/complete")
+def complete_dashboard_reminder(
+    reminder_id: UUID,
+    user: dict | None = Depends(_require_app_user),
+) -> dict[str, str]:
+    """Mark one of this user's reminders as completed."""
+    if not user:
+        raise HTTPException(status_code=401, detail="Sign in to complete reminders.")
+    try:
+        if not complete_user_reminder(user["id"], str(reminder_id)):
+            raise HTTPException(status_code=404, detail="Reminder not found.")
+        return {"status": "completed"}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Could not complete reminder")
+        raise HTTPException(status_code=400, detail="Could not complete reminder. Please try again.") from exc
+
+
+@app.delete("/api/dashboard/reminders/{reminder_id}")
+def delete_dashboard_reminder(
+    reminder_id: UUID,
+    user: dict | None = Depends(_require_app_user),
+) -> dict[str, str]:
+    """Delete a reminder without changing the email in Gmail."""
+    if not user:
+        raise HTTPException(status_code=401, detail="Sign in to delete reminders.")
+    try:
+        if not delete_user_reminder(user["id"], str(reminder_id)):
+            raise HTTPException(status_code=404, detail="Reminder not found.")
+        return {"status": "deleted"}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Could not delete reminder")
+        raise HTTPException(status_code=400, detail="Could not delete reminder. Please try again.") from exc
 
 
 @app.post("/api/dashboard/emails/{email_id}/reply/draft")

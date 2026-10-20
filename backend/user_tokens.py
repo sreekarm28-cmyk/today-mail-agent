@@ -514,6 +514,116 @@ def get_persistent_email_by_id(user_id: str, email_id: str) -> dict | None:
     }
 
 
+def get_reminder_email(user_id: str, email_id: str) -> dict | None:
+    """Return minimal email details only when it belongs to this user and is visible."""
+    rows = _request(
+        "GET",
+        "emails?select=id&"
+        f"id=eq.{quote(email_id, safe='')}&user_id=eq.{quote(user_id, safe='')}"
+        "&deleted=eq.false&hidden_in_app=eq.false&limit=1",
+    )
+    return rows[0] if isinstance(rows, list) and rows else None
+
+
+def create_user_reminder(
+    user_id: str, email_id: str, remind_at: str, note: str
+) -> dict:
+    rows = _request(
+        "POST",
+        "reminders?select=id,email_id,remind_at,note,completed_at,created_at",
+        {
+            "user_id": user_id,
+            "email_id": email_id,
+            "remind_at": remind_at,
+            "note": note,
+        },
+        prefer="return=representation",
+    )
+    if not isinstance(rows, list) or not rows:
+        raise RuntimeError("Supabase did not return the saved reminder.")
+    return rows[0]
+
+
+def list_user_reminders(user_id: str) -> list[dict]:
+    """Load this user's incomplete reminders and safe summary fields for their emails."""
+    user_filter = quote(user_id, safe="")
+    reminders = _request(
+        "GET",
+        "reminders?select=id,email_id,remind_at,note,completed_at,created_at"
+        f"&user_id=eq.{user_filter}&completed_at=is.null"
+        "&order=remind_at.asc&limit=500",
+    )
+    if not isinstance(reminders, list):
+        raise RuntimeError("Supabase returned an invalid reminder list.")
+    if not reminders:
+        return []
+
+    email_ids = sorted({str(row["email_id"]) for row in reminders if row.get("email_id")})
+    if not email_ids:
+        return []
+    id_filter = ",".join(quote(email_id, safe="") for email_id in email_ids)
+    emails = _request(
+        "GET",
+        "emails?select=id,subject,sender,internal_date,deleted,hidden_in_app"
+        f"&user_id=eq.{user_filter}&id=in.({id_filter})&limit=500",
+    )
+    if not isinstance(emails, list):
+        raise RuntimeError("Supabase returned invalid reminder email details.")
+    email_by_id = {str(row["id"]): row for row in emails}
+    result = []
+    for reminder in reminders:
+        email = email_by_id.get(str(reminder.get("email_id")), {})
+        internal_date = int(email.get("internal_date") or 0)
+        received = (
+            datetime.fromtimestamp(internal_date / 1000, tz=timezone.utc).isoformat(timespec="minutes")
+            if internal_date else ""
+        )
+        result.append({
+            **reminder,
+            "subject": email.get("subject", "Email no longer available"),
+            "sender": email.get("sender", ""),
+            "received": received,
+            "email_available": bool(email) and not email.get("deleted") and not email.get("hidden_in_app"),
+        })
+    return result
+
+
+def update_user_reminder(
+    user_id: str, reminder_id: str, remind_at: str, note: str
+) -> bool:
+    rows = _request(
+        "PATCH",
+        "reminders?select=id&"
+        f"id=eq.{quote(reminder_id, safe='')}&user_id=eq.{quote(user_id, safe='')}"
+        "&completed_at=is.null",
+        {"remind_at": remind_at, "note": note},
+        prefer="return=representation",
+    )
+    return isinstance(rows, list) and bool(rows)
+
+
+def complete_user_reminder(user_id: str, reminder_id: str) -> bool:
+    rows = _request(
+        "PATCH",
+        "reminders?select=id&"
+        f"id=eq.{quote(reminder_id, safe='')}&user_id=eq.{quote(user_id, safe='')}"
+        "&completed_at=is.null",
+        {"completed_at": datetime.now(timezone.utc).isoformat()},
+        prefer="return=representation",
+    )
+    return isinstance(rows, list) and bool(rows)
+
+
+def delete_user_reminder(user_id: str, reminder_id: str) -> bool:
+    rows = _request(
+        "DELETE",
+        "reminders?select=id&"
+        f"id=eq.{quote(reminder_id, safe='')}&user_id=eq.{quote(user_id, safe='')}",
+        prefer="return=representation",
+    )
+    return isinstance(rows, list) and bool(rows)
+
+
 def save_scheduled_reply(user_id: str, values: dict) -> dict:
     """Save a user-approved reply for the scheduled backend worker."""
     rows = _request(

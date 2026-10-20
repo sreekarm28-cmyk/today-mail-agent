@@ -16,6 +16,7 @@ from .email_tool import (
     normalize_email_body,
     get_gmail_reply_context,
     send_gmail_reply,
+    send_gmail_message,
 )
 from .diagnostics import log_timing
 from .llm import OPENROUTER_EMBEDDING_MODEL, chat, embed_texts
@@ -25,8 +26,11 @@ from .user_tokens import (
     get_gmail_connection,
     get_persistent_email_by_id,
     save_scheduled_reply,
+    save_scheduled_message,
     claim_due_scheduled_replies,
+    claim_due_scheduled_messages,
     update_scheduled_reply_status,
+    update_scheduled_message_status,
     get_email_embedding_chunks,
     get_recent_email_bodies_for_embedding,
     get_mailbox_sync_state,
@@ -826,6 +830,60 @@ def create_reply_draft(user_id: str, email_id: str, instruction: str) -> dict[st
         flush_client(client)
 
 
+def create_new_email_draft(
+    user_id: str, connection_id: str, recipient: str, subject: str, instruction: str
+) -> dict[str, str]:
+    """Generate an editable new-email draft; the function never sends it."""
+    connection = get_gmail_connection(user_id, connection_id)
+    if not connection:
+        raise LookupError("Gmail account not found for this user.")
+    started = perf_counter()
+    client = get_langfuse_client()
+    try:
+        with observation(client, as_type="span", name="draft-new-email") as span:
+            message = chat(
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Write a concise, natural email using the user's instructions. "
+                            "Do not invent facts or commitments. Return only the email body, "
+                            "without a subject line or explanation."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": json.dumps(
+                            {
+                                "recipient": recipient.strip(),
+                                "subject": subject.strip(),
+                                "instruction": instruction.strip()[:1200],
+                            },
+                            ensure_ascii=False,
+                        ),
+                    },
+                ],
+                [],
+                max_tokens=700,
+            )
+            draft = message.get("content")
+            if not isinstance(draft, str) or not draft.strip():
+                raise RuntimeError("The model returned no email draft.")
+            record_metadata(span, status="success", draft_chars=len(draft.strip()))
+            log_timing("compose.draft", started, status="success")
+            return {
+                "draft": draft.strip(),
+                "recipient": recipient.strip(),
+                "subject": subject.strip(),
+                "from_email": connection["email"],
+            }
+    except Exception as exc:
+        log_timing("compose.draft", started, status="error", error_type=type(exc).__name__)
+        raise
+    finally:
+        flush_client(client)
+
+
 def _load_reply_context(user_id: str, email_id: str) -> tuple[dict, dict[str, str]]:
     email = get_persistent_email_by_id(user_id, email_id)
     if not email:
@@ -844,6 +902,21 @@ def send_approved_reply(user_id: str, email_id: str, body: str) -> dict[str, str
     email, context = _load_reply_context(user_id, email_id)
     gmail_sent_id = send_gmail_reply(
         user_id, email["connection_id"], context, body
+    )
+    return {"status": "sent", "gmail_message_id": gmail_sent_id}
+
+
+def send_approved_new_email(
+    user_id: str, connection_id: str, recipient: str, subject: str, body: str
+) -> dict[str, str]:
+    """Send the exact new-email text approved by the user."""
+    if not body.strip():
+        raise ValueError("Email text cannot be empty.")
+    connection = get_gmail_connection(user_id, connection_id)
+    if not connection:
+        raise LookupError("Gmail account not found for this user.")
+    gmail_sent_id = send_gmail_message(
+        user_id, connection_id, recipient, subject, body
     )
     return {"status": "sent", "gmail_message_id": gmail_sent_id}
 
@@ -872,6 +945,36 @@ def schedule_approved_reply(
         "send_at": send_at.astimezone(timezone.utc).isoformat(),
     }
     saved = save_scheduled_reply(user_id, values)
+    return {"status": saved.get("status", "pending"), "send_at": saved["send_at"]}
+
+
+def schedule_approved_new_email(
+    user_id: str,
+    connection_id: str,
+    recipient: str,
+    subject: str,
+    body: str,
+    send_at: datetime,
+) -> dict[str, str]:
+    """Save an approved new email for delivery by the existing timer."""
+    if not body.strip() or not subject.strip() or not recipient.strip():
+        raise ValueError("Recipient, subject, and email text are required.")
+    if send_at.tzinfo is None or send_at.utcoffset() is None:
+        raise ValueError("Choose a send time with a time zone.")
+    if send_at <= datetime.now(timezone.utc):
+        raise ValueError("Choose a send time in the future.")
+    if not get_gmail_connection(user_id, connection_id):
+        raise LookupError("Gmail account not found for this user.")
+    saved = save_scheduled_message(
+        user_id,
+        {
+            "connection_id": connection_id,
+            "recipient_email": recipient.strip(),
+            "subject": subject.strip(),
+            "body": body.strip(),
+            "send_at": send_at.astimezone(timezone.utc).isoformat(),
+        },
+    )
     return {"status": saved.get("status", "pending"), "send_at": saved["send_at"]}
 
 
@@ -918,6 +1021,51 @@ def process_due_scheduled_replies(limit: int = 20) -> dict[str, int]:
                 except Exception as status_exc:
                     logger.error(
                         "Could not record scheduled reply failure (%s).",
+                        type(status_exc).__name__,
+                    )
+    return result
+
+
+def process_due_scheduled_messages(limit: int = 20) -> dict[str, int]:
+    """Send due new emails and record each result for the existing timer."""
+    rows = claim_due_scheduled_messages(limit)
+    result = {"messages_checked": len(rows), "messages_sent": 0, "messages_failed": 0}
+    for row in rows:
+        user_id = row.get("user_id")
+        message_id = row.get("id")
+        try:
+            if not user_id or not row.get("connection_id") or not message_id:
+                raise RuntimeError("Scheduled email is missing required ownership data.")
+            send_gmail_message(
+                user_id,
+                row["connection_id"],
+                row.get("recipient_email", ""),
+                row.get("subject", ""),
+                row.get("body", ""),
+            )
+            updated = update_scheduled_message_status(
+                message_id,
+                user_id,
+                "sent",
+                sent_at=datetime.now(timezone.utc).isoformat(),
+            )
+            if not updated:
+                raise RuntimeError("Could not mark the scheduled email as sent.")
+            result["messages_sent"] += 1
+        except Exception as exc:
+            logger.warning("Scheduled email failed (%s).", type(exc).__name__)
+            result["messages_failed"] += 1
+            if user_id and message_id:
+                try:
+                    update_scheduled_message_status(
+                        message_id,
+                        user_id,
+                        "failed",
+                        last_error="Delivery failed. Reopen the app to review and retry.",
+                    )
+                except Exception as status_exc:
+                    logger.error(
+                        "Could not record scheduled email failure (%s).",
                         type(status_exc).__name__,
                     )
     return result
@@ -1124,6 +1272,7 @@ def answer_question_about_recent_emails(
 def process_scheduled_emails() -> dict[str, int | str]:
     """Send due replies first, then sync and classify connected mailboxes."""
     reply_result = process_due_scheduled_replies()
+    message_result = process_due_scheduled_messages()
     connections = list_gmail_connections()
     result: dict[str, int | str] = {
         "status": "success",
@@ -1135,6 +1284,7 @@ def process_scheduled_emails() -> dict[str, int | str]:
         "failed_accounts": 0,
         "failed_emails": 0,
         **reply_result,
+        **message_result,
     }
 
     for connection in connections:
@@ -1154,6 +1304,11 @@ def process_scheduled_emails() -> dict[str, int | str]:
             logger.warning("Scheduled Gmail processing failed for one connection (%s).", type(exc).__name__)
             result["failed_accounts"] += 1
 
-    if result["failed_accounts"] or result["failed_emails"] or result["replies_failed"]:
+    if (
+        result["failed_accounts"]
+        or result["failed_emails"]
+        or result["replies_failed"]
+        or result["messages_failed"]
+    ):
         result["status"] = "partial"
     return result

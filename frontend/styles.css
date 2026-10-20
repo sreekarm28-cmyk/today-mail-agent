@@ -228,29 +228,43 @@ button:disabled { cursor: wait; opacity: .58; }
 .dialog-footer { padding: 11px 21px; border-top: 1px solid #efedf0; color: #99959e; font-size: 8px; }
 .email-dialog-footer { display: flex; align-items: center; justify-content: flex-end; gap: 9px; padding: 10px 16px 10px 21px; border-top: 1px solid #efedf0; color: #99959e; font-size: 8px; }
 .email-dialog-footer > span { margin-right: auto; }
+.section-actions { display: flex; align-items: center; gap: 14px; }
+.compose-open-button { min-height: 35px; padding: 0 14px; border: 1px solid #ddd6ef; border-radius: 11px; background: #fff; color: #57469e; font-size: 10px; font-weight: 750; box-shadow: 0 4px 14px #3025410a; transition: transform .16s,border-color .16s,box-shadow .16s; }
+.compose-open-button span { margin-left: 7px; font-size: 12px; }
+.compose-open-button:hover:not(:disabled) { transform: translateY(-1px); border-color: #c7bae7; box-shadow: 0 7px 18px #30254114; }
+.compose-open-button:disabled { cursor: not-allowed; opacity: .5; }
 .hide-email-button { min-height: 28px; padding: 0 10px; border: 1px solid #ead6d3; border-radius: 8px; background: #fff; color: #a34e45; font-size: 9px; font-weight: 700; }
 .hide-email-button:hover:not(:disabled) { border-color: #d7b7b2; background: #fff7f5; }
 .reply-open-button, .reply-send-button, .reply-generate-button, .reply-secondary-button, .reply-close-button { min-height: 31px; padding: 0 12px; border: 1px solid transparent; border-radius: 9px; font-size: 9px; font-weight: 700; transition: transform .16s,background .16s,border-color .16s,box-shadow .16s; }
 .reply-open-button, .reply-generate-button, .reply-send-button { background: #6451b4; color: #fff; box-shadow: 0 4px 11px #6451b426; }
 .reply-open-button:hover:not(:disabled), .reply-generate-button:hover:not(:disabled), .reply-send-button:hover:not(:disabled) { transform: translateY(-1px); background: #55429f; box-shadow: 0 6px 14px #6451b433; }
 .reply-open-button:disabled, .reply-generate-button:disabled, .reply-send-button:disabled { cursor: wait; opacity: .55; }
-.reply-secondary-button, .reply-close-button { border-color: #e7e3ed; background: #fff; color: #625c6e; }
-.reply-secondary-button:hover:not(:disabled), .reply-close-button:hover { border-color: #cfc5e8; background: #f8f6fc; color: #51408f; }
-.reply-composer { max-height: 48dvh; overflow-y: auto; padding: 15px 20px 18px; border-top: 1px solid #ebe8ef; background: linear-gradient(160deg,#fcfbff,#fff 68%); }
-.reply-composer-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
-.reply-composer-heading h3 { max-width: 520px; margin: 4px 0 0; overflow: hidden; color: #38343e; font: 700 12px/1.4 Manrope,sans-serif; text-overflow: ellipsis; white-space: nowrap; }
-.reply-close-button { min-height: 27px; padding: 0 9px; }
-.reply-meta { display: flex; gap: 12px; margin-bottom: 12px; color: #77727f; font-size: 9px; }
-.reply-meta span:first-child, .reply-composer label { color: #8e8996; font-size: 9px; font-weight: 650; }
-.reply-composer label { display: block; margin: 10px 0 6px; }
-.reply-composer textarea, .reply-schedule-controls input { display: block; width: 100%; padding: 10px 11px; border: 1px solid #e8e4ec; border-radius: 10px; outline: none; background: #fff; color: #403c47; font: 10px/1.6 "DM Sans",sans-serif; }
-.reply-composer textarea:focus, .reply-schedule-controls input:focus { border-color: #c7bae7; box-shadow: 0 0 0 3px #7357e80c; }
-.reply-composer textarea { resize: vertical; }
-.reply-composer-actions, .reply-send-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 9px; }
+.reply-secondary-button { border-color: #e7e3ed; background: #fff; color: #625c6e; }
+.reply-secondary-button:hover:not(:disabled) { border-color: #cfc5e8; background: #f8f6fc; color: #51408f; }
+.compose-dialog { width: min(760px,calc(100% - 28px)); max-height: min(90dvh,900px); padding: 0; overflow: hidden; border: 1px solid #e8e5eb; border-radius: 20px; background: #fff; color: var(--ink); box-shadow: 0 28px 100px #211b3540; }
+.compose-dialog[open] { display: flex; flex-direction: column; }
+.compose-dialog::backdrop { background: #25212f70; backdrop-filter: blur(5px); }
+.compose-dialog-top { display: flex; align-items: flex-start; justify-content: space-between; padding: 22px 26px 18px; border-bottom: 1px solid #efedf0; background: linear-gradient(125deg,#fbfaff,#fff 75%); }
+.compose-dialog-top h2 { margin: 5px 0 0; color: #342f3d; font: 750 21px/1.25 Manrope,sans-serif; letter-spacing: -.6px; }
+.compose-fields { padding: 13px 26px 4px; }
+.compose-account-row, .compose-line { display: grid; grid-template-columns: 68px minmax(0,1fr); align-items: center; gap: 12px; min-height: 43px; border-bottom: 1px solid #f0eef2; color: #898491; font-size: 11px; }
+.compose-account-row select, .compose-line input { width: 100%; border: 0; outline: 0; background: transparent; color: #393541; font: 11px "DM Sans",sans-serif; }
+.compose-account-row select { padding: 9px 0; }
+.compose-line input { padding: 12px 0; }
+.compose-line input::placeholder, .compose-instructions textarea::placeholder, .compose-draft-area textarea::placeholder { color: #aaa6b0; }
+.compose-account-row select:focus, .compose-line:focus-within { color: #6451b4; }
+.compose-instructions { padding: 19px 26px 13px; }
+.compose-instructions > label, .compose-draft-area > label { display: flex; justify-content: space-between; gap: 10px; margin: 0 0 8px; color: #65606d; font-size: 10px; font-weight: 700; }
+.compose-instructions > label span, .compose-draft-area > label span { color: #aaa6b0; font-size: 9px; font-weight: 500; }
+.compose-instructions textarea, .compose-draft-area textarea, .reply-schedule-controls input { display: block; width: 100%; padding: 13px 14px; border: 1px solid #e9e5ed; border-radius: 12px; outline: none; background: #fcfbfd; color: #403c47; font: 11px/1.65 "DM Sans",sans-serif; transition: border-color .16s,box-shadow .16s,background .16s; }
+.compose-instructions textarea:focus, .compose-draft-area textarea:focus, .reply-schedule-controls input:focus { border-color: #c7bae7; background: #fff; box-shadow: 0 0 0 4px #7357e80c; }
+.compose-instructions textarea { width: 100%; resize: vertical; }
+.compose-tools-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .reply-status { margin-top: 9px; color: #77727f; font-size: 9px; line-height: 1.5; }
 .reply-status.error { color: #a54840; }
-.reply-draft-area { margin-top: 13px; padding-top: 2px; border-top: 1px solid #eeeaf2; }
-.reply-draft-area textarea { min-height: 115px; }
+.compose-draft-area { min-height: 0; overflow-y: auto; padding: 17px 26px 24px; border-top: 1px solid #efedf0; background: linear-gradient(180deg,#fdfcff,#fff 40%); }
+.compose-draft-area textarea { min-height: 210px; resize: vertical; background: #fff; }
+.compose-send-row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 .reply-schedule-controls { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: end; gap: 9px; margin-top: 12px; }
 .reply-schedule-controls label { grid-column: 1 / -1; margin-bottom: -4px; }
 .reply-schedule-controls input { min-width: 0; }
@@ -272,9 +286,20 @@ button:disabled { cursor: wait; opacity: .58; }
   .email-dialog-footer { justify-content: flex-end; gap: 6px; padding: 9px 10px; }
   .email-dialog-footer > span { display: none; }
   .reply-open-button, .hide-email-button { min-height: 30px; padding: 0 8px; font-size: 8px; }
-  .reply-composer { max-height: 52dvh; padding: 12px; }
-  .reply-composer-actions, .reply-send-actions { gap: 6px; }
-  .reply-composer-actions button, .reply-send-actions button, .reply-schedule-controls button { flex: 1; padding: 0 8px; font-size: 8px; }
+  .section-actions { gap: 7px; }
+  .section-actions .sort-note { display: none; }
+  .compose-open-button { min-height: 32px; padding: 0 10px; }
+  .compose-dialog { max-height: 94dvh; border-radius: 16px; }
+  .compose-dialog-top { padding: 17px 16px 14px; }
+  .compose-dialog-top h2 { font-size: 18px; }
+  .compose-fields { padding: 10px 16px 2px; }
+  .compose-account-row, .compose-line { grid-template-columns: 52px minmax(0,1fr); gap: 7px; min-height: 40px; font-size: 10px; }
+  .compose-instructions { padding: 15px 16px 10px; }
+  .compose-draft-area { padding: 14px 16px 18px; }
+  .compose-draft-area textarea { min-height: 170px; }
+  .compose-tools-row button, .compose-send-row button, .reply-schedule-controls button { flex: 1; padding: 0 9px; font-size: 9px; }
+  .reply-schedule-controls { grid-template-columns: minmax(0,1fr); }
+  .reply-schedule-controls label, .reply-schedule-controls .reply-send-button { grid-column: 1; }
 }
 @media (max-width: 560px) {
   .topbar { align-items: center; gap: 9px; padding: 0 12px; }

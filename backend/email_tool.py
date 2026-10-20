@@ -296,6 +296,42 @@ def send_gmail_reply(
     return str(result["id"])
 
 
+def send_gmail_message(
+    user_id: str,
+    connection_id: str,
+    recipient: str,
+    subject: str,
+    body: str,
+) -> str:
+    """Send a new email after the user has reviewed and approved its text."""
+    addresses = getaddresses([recipient])
+    parsed = [address for _, address in addresses if address]
+    if not parsed or any("@" not in address for address in parsed):
+        raise ValueError("Enter a valid recipient email address.")
+    if not subject.strip() or not body.strip():
+        raise ValueError("Email subject and message cannot be empty.")
+    message = EmailMessage(policy=policy.SMTP)
+    message["To"] = ", ".join(parsed)
+    message["Subject"] = subject.strip()
+    message.set_content(body.strip())
+    raw = base64.urlsafe_b64encode(message.as_bytes()).decode("ascii").rstrip("=")
+    started = perf_counter()
+    try:
+        result = _gmail_service(user_id, connection_id).users().messages().send(
+            userId="me", body={"raw": raw}
+        ).execute()
+    except Exception as exc:
+        if getattr(getattr(exc, "resp", None), "status", None) == 403:
+            raise GmailSendPermissionError(
+                "Approve Gmail's send permission before sending messages."
+            ) from exc
+        raise
+    if not isinstance(result, dict) or not result.get("id"):
+        raise RuntimeError("Gmail did not confirm that the email was sent.")
+    log_timing("gmail.send_message", started)
+    return str(result["id"])
+
+
 def prepare_initial_mailbox_sync(user_id: str, days: int, connection_id: str):
     """Build one Gmail client and read the history ID before listing mailbox messages."""
     credentials = _credentials(user_id, connection_id)

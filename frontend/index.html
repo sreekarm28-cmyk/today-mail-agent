@@ -73,7 +73,7 @@
 
           <div class="section-heading">
             <div><div class="eyebrow">THE LAST 24 HOURS</div><h2>Your emails</h2></div>
-            <div class="sort-note"><span class="sort-dot"></span> Newest first</div>
+            <div class="section-actions"><div class="sort-note"><span class="sort-dot"></span> Newest first</div><button id="compose-open" class="compose-open-button" type="button">Compose <span aria-hidden="true">↗</span></button></div>
           </div>
 
           <nav id="account-filters" class="account-filters" aria-label="Filter by Gmail account"></nav>
@@ -143,31 +143,37 @@
         <button id="reply-open" class="reply-open-button" type="button" disabled>Reply</button>
         <button id="hide-email-button" class="hide-email-button" type="button">Remove from app</button>
       </div>
-      <section id="reply-composer" class="reply-composer" hidden aria-label="Reply composer">
-        <div class="reply-composer-heading">
-          <div><span class="dialog-kicker">REPLY</span><h3 id="reply-subject">Re: Email</h3></div>
-          <button id="reply-close" class="reply-close-button" type="button">Close</button>
+    </dialog>
+    <dialog id="compose-dialog" class="compose-dialog" aria-labelledby="compose-title">
+      <div class="compose-dialog-top">
+        <div><span class="dialog-kicker" id="compose-kicker">NEW MESSAGE</span><h2 id="compose-title">Write an email</h2></div>
+        <button id="compose-close" class="close-dialog" type="button" aria-label="Close composer">×</button>
+      </div>
+      <div class="compose-fields">
+        <label class="compose-account-row" id="compose-account-row" for="compose-account"><span>From</span><select id="compose-account" aria-label="Sending Gmail account"></select></label>
+        <label class="compose-line" for="compose-to"><span>To</span><input id="compose-to" type="email" maxlength="320" autocomplete="email" placeholder="name@example.com"></label>
+        <label class="compose-line" for="compose-subject"><span>Subject</span><input id="compose-subject" maxlength="998" placeholder="Add a subject"></label>
+      </div>
+      <div class="compose-instructions">
+        <label for="compose-instruction">Tell AI what you want to say <span>optional</span></label>
+        <textarea id="compose-instruction" rows="2" maxlength="1200" placeholder="Write a polite reply confirming Thursday’s meeting…"></textarea>
+        <div class="compose-tools-row">
+          <button id="compose-generate" class="reply-generate-button" type="button">Draft with AI</button>
+          <button id="compose-authorize" class="reply-secondary-button" type="button">Enable Gmail sending</button>
         </div>
-        <div class="reply-meta"><span>To</span><span id="reply-recipient">Checking recipient…</span></div>
-        <label for="reply-instruction">What should the reply say?</label>
-        <textarea id="reply-instruction" rows="2" maxlength="1200" placeholder="For example: Thank them and say I can attend."></textarea>
-        <div class="reply-composer-actions">
-          <button id="reply-generate" class="reply-generate-button" type="button">Generate draft</button>
-          <button id="reply-authorize" class="reply-secondary-button" type="button">Enable Gmail sending</button>
+      </div>
+      <div id="compose-status" class="reply-status" role="status" aria-live="polite" hidden></div>
+      <section id="compose-draft-area" class="compose-draft-area" hidden>
+        <label for="compose-body">Your message <span>Write or edit it before sending</span></label>
+        <textarea id="compose-body" rows="10" maxlength="20000" placeholder="Your message…"></textarea>
+        <div class="compose-send-row">
+          <button id="compose-send" class="reply-send-button" type="button">Send</button>
+          <button id="compose-show-schedule" class="reply-secondary-button" type="button">Schedule</button>
         </div>
-        <div id="reply-status" class="reply-status" role="status" aria-live="polite" hidden></div>
-        <div id="reply-draft-area" class="reply-draft-area" hidden>
-          <label for="reply-body">Review and edit your reply</label>
-          <textarea id="reply-body" rows="7" maxlength="20000"></textarea>
-          <div class="reply-send-actions">
-            <button id="reply-send-now" class="reply-send-button" type="button">Send now</button>
-            <button id="reply-show-schedule" class="reply-secondary-button" type="button">Schedule</button>
-          </div>
-          <div id="reply-schedule-controls" class="reply-schedule-controls" hidden>
-            <label for="reply-send-at">Send date and time</label>
-            <input id="reply-send-at" type="datetime-local">
-            <button id="reply-confirm-schedule" class="reply-send-button" type="button">Confirm schedule</button>
-          </div>
+        <div id="compose-schedule-controls" class="reply-schedule-controls" hidden>
+          <label for="compose-send-at">Send date and time</label>
+          <input id="compose-send-at" type="datetime-local">
+          <button id="compose-confirm-schedule" class="reply-send-button" type="button">Schedule email</button>
         </div>
       </section>
     </dialog>

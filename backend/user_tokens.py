@@ -527,11 +527,32 @@ def save_scheduled_reply(user_id: str, values: dict) -> dict:
     return rows[0]
 
 
+def save_scheduled_message(user_id: str, values: dict) -> dict:
+    """Save a user-approved new email for later delivery."""
+    rows = _request(
+        "POST",
+        "scheduled_messages?select=id,status,send_at",
+        {"user_id": user_id, **values},
+        prefer="return=representation",
+    )
+    if not isinstance(rows, list) or not rows:
+        raise RuntimeError("Supabase did not return the scheduled email.")
+    return rows[0]
+
+
 def claim_due_scheduled_replies(limit: int = 20) -> list[dict]:
     """Atomically claim due replies so overlapping timer runs do not duplicate work."""
     rows = _request("POST", "rpc/claim_due_scheduled_replies", {"p_limit": limit})
     if not isinstance(rows, list):
         raise RuntimeError("Supabase returned an invalid scheduled reply list.")
+    return rows
+
+
+def claim_due_scheduled_messages(limit: int = 20) -> list[dict]:
+    """Atomically claim due new emails for one worker run."""
+    rows = _request("POST", "rpc/claim_due_scheduled_messages", {"p_limit": limit})
+    if not isinstance(rows, list):
+        raise RuntimeError("Supabase returned an invalid scheduled email list.")
     return rows
 
 
@@ -551,6 +572,28 @@ def update_scheduled_reply_status(
         "PATCH",
         "scheduled_replies?select=id&"
         f"id=eq.{quote(reply_id, safe='')}&user_id=eq.{quote(user_id, safe='')}&status=eq.sending",
+        values,
+        prefer="return=representation",
+    )
+    return isinstance(rows, list) and bool(rows)
+
+
+def update_scheduled_message_status(
+    message_id: str,
+    user_id: str,
+    status: str,
+    *,
+    sent_at: str | None = None,
+    last_error: str | None = None,
+) -> bool:
+    """Update a claimed scheduled new email without exposing provider details."""
+    values = {"status": status, "last_error": last_error}
+    if sent_at:
+        values["sent_at"] = sent_at
+    rows = _request(
+        "PATCH",
+        "scheduled_messages?select=id&"
+        f"id=eq.{quote(message_id, safe='')}&user_id=eq.{quote(user_id, safe='')}&status=eq.sending",
         values,
         prefer="return=representation",
     )

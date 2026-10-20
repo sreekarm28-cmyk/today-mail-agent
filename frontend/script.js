@@ -31,19 +31,18 @@ const gmailStatus = document.querySelector("#gmail-status");
 const connectionNote = document.querySelector("#connection-note");
 const emailDialog = document.querySelector("#email-dialog");
 const summaryDialog = document.querySelector("#summary-dialog");
-const replyComposer = document.querySelector("#reply-composer");
+const composeDialog = document.querySelector("#compose-dialog");
 const replyOpenButton = document.querySelector("#reply-open");
-const replyInstruction = document.querySelector("#reply-instruction");
-const replyBody = document.querySelector("#reply-body");
-const replyStatus = document.querySelector("#reply-status");
-const replyDraftArea = document.querySelector("#reply-draft-area");
-const replyGenerateButton = document.querySelector("#reply-generate");
-const replyAuthorizeButton = document.querySelector("#reply-authorize");
-const replySendButton = document.querySelector("#reply-send-now");
-const replyScheduleControls = document.querySelector("#reply-schedule-controls");
+const composeStatus = document.querySelector("#compose-status");
+const composeDraftArea = document.querySelector("#compose-draft-area");
+const composeGenerateButton = document.querySelector("#compose-generate");
+const composeSendButton = document.querySelector("#compose-send");
+const composeScheduleControls = document.querySelector("#compose-schedule-controls");
 let emails = [];
 let gmailAccounts = [];
 let selectedEmail = null;
+let composeMode = "new";
+let composeReplyEmail = null;
 let askAiHistory = [];
 let activeFilter = "All mail";
 let activeAccountFilter = "all";
@@ -240,7 +239,7 @@ async function updateGmailStatus() {
     if (new URLSearchParams(window.location.search).get("gmail") === "send_enabled") {
       syncStatus.hidden = false;
       syncStatus.className = "sync-status";
-      syncStatus.textContent = "Gmail sending permission is enabled. Reopen the email to continue your reply.";
+      syncStatus.textContent = "Gmail sending permission is enabled. You can now send messages from this account.";
       window.history.replaceState({}, "", window.location.pathname);
     }
     if (new URLSearchParams(window.location.search).get("gmail") === "wrong_account") {
@@ -777,6 +776,7 @@ function renderEmail(email) {
 }
 
 function renderDashboard() {
+  document.querySelector("#compose-open").disabled = gmailAccounts.length === 0;
   renderAccountFilters();
   renderFilters();
   const accountEmails = emailsForSelectedAccount();
@@ -830,13 +830,8 @@ function renderDashboard() {
 
 async function openEmail(email) {
   selectedEmail = email;
-  replyComposer.hidden = true;
   replyOpenButton.disabled = true;
-  replyInstruction.value = "";
-  replyBody.value = "";
-  replyDraftArea.hidden = true;
-  replyScheduleControls.hidden = true;
-  replyStatus.hidden = true;
+  composeDialog.close();
   document.querySelector("#email-dialog-subject").textContent = email.subject || "Email";
   document.querySelector("#email-dialog-from").textContent = email.from || "Unknown sender";
   document.querySelector("#email-dialog-to").textContent = "";
@@ -872,126 +867,189 @@ async function openEmail(email) {
   }
 }
 
-function setReplyStatus(message, isError = false) {
-  replyStatus.textContent = message;
-  replyStatus.classList.toggle("error", isError);
-  replyStatus.hidden = !message;
+function setComposeStatus(message, isError = false) {
+  composeStatus.textContent = message;
+  composeStatus.classList.toggle("error", isError);
+  composeStatus.hidden = !message;
 }
 
-async function generateReplyDraft() {
-  if (!selectedEmail) return;
-  const instruction = replyInstruction.value.trim();
-  if (!instruction) {
-    setReplyStatus("Tell the AI what you want the reply to say.", true);
-    replyInstruction.focus();
-    return;
+function selectedComposeConnectionId() {
+  return composeMode === "reply"
+    ? composeReplyEmail?.connection_id
+    : document.querySelector("#compose-account").value;
+}
+
+function openComposer(mode, email = null) {
+  composeMode = mode;
+  composeReplyEmail = mode === "reply" ? email : null;
+  const isReply = mode === "reply";
+  const accountSelect = document.querySelector("#compose-account");
+  accountSelect.replaceChildren(...gmailAccounts.map((account) => {
+    const option = document.createElement("option");
+    option.value = account.id;
+    option.textContent = account.email;
+    return option;
+  }));
+  if (isReply) accountSelect.value = email.connection_id || "";
+  document.querySelector("#compose-title").textContent = isReply ? "Reply to email" : "Write an email";
+  document.querySelector("#compose-kicker").textContent = isReply ? "REPLY" : "NEW MESSAGE";
+  document.querySelector("#compose-account-row").hidden = isReply;
+  document.querySelector("#compose-to").readOnly = isReply;
+  document.querySelector("#compose-to").value = isReply ? (email.from || "") : "";
+  document.querySelector("#compose-subject").value = isReply
+    ? `Re: ${(email.subject || "").replace(/^Re:\\s*/i, "")}`
+    : "";
+  document.querySelector("#compose-instruction").value = "";
+  document.querySelector("#compose-body").value = "";
+  composeDraftArea.hidden = false;
+  composeScheduleControls.hidden = true;
+  composeStatus.hidden = true;
+  composeGenerateButton.disabled = false;
+  composeSendButton.disabled = false;
+  document.querySelector("#compose-authorize").hidden = false;
+  document.querySelector("#compose-send-at").value = "";
+  if (!gmailAccounts.length) {
+    setComposeStatus("Connect a Gmail account before writing a message.", true);
   }
-  replyGenerateButton.disabled = true;
-  replyGenerateButton.textContent = "Writing draft…";
-  setReplyStatus("The AI is preparing a draft. It will not send it.");
+  composeDialog.showModal();
+  document.querySelector("#compose-to").focus();
+}
+
+async function generateComposeDraft() {
+  const recipient = document.querySelector("#compose-to").value.trim();
+  const subject = document.querySelector("#compose-subject").value.trim();
+  const instruction = document.querySelector("#compose-instruction").value.trim();
+  const connectionId = selectedComposeConnectionId();
+  if (!connectionId) return setComposeStatus("Choose a connected Gmail account first.", true);
+  if (!recipient) return setComposeStatus("Enter the recipient’s email address.", true);
+  if (!subject) return setComposeStatus("Add a subject before drafting.", true);
+  if (!instruction) return setComposeStatus("Tell the AI what you want the email to say.", true);
+  composeGenerateButton.disabled = true;
+  composeGenerateButton.textContent = "Writing…";
+  setComposeStatus("The AI is preparing a draft. It will not send it.");
   try {
-    const response = await apiFetch(
-      `/api/dashboard/emails/${encodeURIComponent(selectedEmail.id)}/reply/draft`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ instruction }),
-      },
-    );
+    const path = composeMode === "reply"
+      ? `/api/dashboard/emails/${encodeURIComponent(composeReplyEmail.id)}/reply/draft`
+      : "/api/dashboard/compose/draft";
+    const requestBody = composeMode === "reply"
+      ? { instruction }
+      : { connection_id: connectionId, recipient, subject, instruction };
+    const response = await apiFetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(requestBody),
+    });
     const payload = await response.json();
-    if (!response.ok) throw new Error(payload.detail || "Could not write the reply draft.");
-    document.querySelector("#reply-recipient").textContent = payload.recipient || selectedEmail.from || "Unknown recipient";
-    document.querySelector("#reply-subject").textContent = `Re: ${payload.subject || selectedEmail.subject || "Email"}`;
-    replyBody.value = payload.draft || "";
-    replyDraftArea.hidden = !replyBody.value;
-    setReplyStatus(replyBody.value ? "Draft ready. Review and edit it before sending or scheduling." : "The AI returned an empty draft.", !replyBody.value);
+    if (!response.ok) throw new Error(payload.detail || "Could not prepare the draft.");
+    if (payload.recipient) document.querySelector("#compose-to").value = payload.recipient;
+    if (payload.subject) document.querySelector("#compose-subject").value = composeMode === "reply"
+      ? `Re: ${payload.subject.replace(/^Re:\\s*/i, "")}`
+      : payload.subject;
+    document.querySelector("#compose-body").value = payload.draft || "";
+    composeDraftArea.hidden = !payload.draft;
+    setComposeStatus(payload.draft ? "Draft ready. Review and edit it before sending or scheduling." : "The AI returned an empty draft.", !payload.draft);
   } catch (error) {
-    setReplyStatus(error.message || "Could not write the reply draft.", true);
+    setComposeStatus(error.message || "Could not prepare the draft.", true);
   } finally {
-    replyGenerateButton.disabled = false;
-    replyGenerateButton.textContent = "Generate draft";
+    composeGenerateButton.disabled = false;
+    composeGenerateButton.textContent = "Draft with AI";
   }
 }
 
 async function authorizeGmailSending() {
-  if (!selectedEmail?.connection_id) {
-    setReplyStatus("This email is not linked to a Gmail account.", true);
-    return;
-  }
-  replyAuthorizeButton.disabled = true;
-  replyAuthorizeButton.textContent = "Opening Google…";
+  const connectionId = selectedComposeConnectionId();
+  if (!connectionId) return setComposeStatus("Choose a Gmail account first.", true);
+  const button = document.querySelector("#compose-authorize");
+  button.disabled = true;
+  button.textContent = "Opening Google…";
   try {
     const response = await apiFetch(
-      `/api/gmail/accounts/${encodeURIComponent(selectedEmail.connection_id)}/authorize-send`,
+      `/api/gmail/accounts/${encodeURIComponent(connectionId)}/authorize-send`,
       { method: "POST" },
     );
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.detail || "Could not open Google permissions.");
     window.location.assign(payload.authorization_url);
   } catch (error) {
-    setReplyStatus(error.message || "Could not open Google permissions.", true);
-    replyAuthorizeButton.disabled = false;
-    replyAuthorizeButton.textContent = "Enable Gmail sending";
+    setComposeStatus(error.message || "Could not open Google permissions.", true);
+    button.disabled = false;
+    button.textContent = "Enable Gmail sending";
   }
 }
 
-async function sendReplyNow() {
-  if (!selectedEmail || !replyBody.value.trim()) return;
-  const recipient = document.querySelector("#reply-recipient").textContent;
-  if (!window.confirm(`Send this approved reply to ${recipient}?`)) return;
-  replySendButton.disabled = true;
-  replySendButton.textContent = "Sending…";
+async function sendComposedMessage() {
+  const recipient = document.querySelector("#compose-to").value.trim();
+  const subject = document.querySelector("#compose-subject").value.trim();
+  const body = document.querySelector("#compose-body").value.trim();
+  const connectionId = selectedComposeConnectionId();
+  if (!recipient || !subject || !body || !connectionId) {
+    return setComposeStatus("Check the recipient, subject, and message before sending.", true);
+  }
+  if (!window.confirm(`Send this message to ${recipient}?`)) return;
+  composeSendButton.disabled = true;
+  composeSendButton.textContent = "Sending…";
   try {
-    const response = await apiFetch(
-      `/api/dashboard/emails/${encodeURIComponent(selectedEmail.id)}/reply/send`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ body: replyBody.value }),
-      },
-    );
+    const path = composeMode === "reply"
+      ? `/api/dashboard/emails/${encodeURIComponent(composeReplyEmail.id)}/reply/send`
+      : "/api/dashboard/compose/send";
+    const requestBody = composeMode === "reply"
+      ? { body }
+      : { connection_id: connectionId, recipient, subject, body };
+    const response = await apiFetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(requestBody),
+    });
     const payload = await response.json();
-    if (!response.ok) throw new Error(payload.detail || "Could not send the reply.");
-    setReplyStatus("Reply sent.");
-    replyDraftArea.hidden = true;
+    if (!response.ok) throw new Error(payload.detail || "Could not send the message.");
+    setComposeStatus(composeMode === "reply" ? "Reply sent." : "Email sent.");
+    composeDraftArea.hidden = true;
   } catch (error) {
-    setReplyStatus(error.message || "Could not send the reply.", true);
+    setComposeStatus(error.message || "Could not send the message.", true);
   } finally {
-    replySendButton.disabled = false;
-    replySendButton.textContent = "Send now";
+    composeSendButton.disabled = false;
+    composeSendButton.textContent = "Send";
   }
 }
 
-async function scheduleReply() {
-  if (!selectedEmail || !replyBody.value.trim()) return;
-  const localValue = document.querySelector("#reply-send-at").value;
+async function scheduleComposedMessage() {
+  const localValue = document.querySelector("#compose-send-at").value;
   const sendDate = localValue ? new Date(localValue) : null;
+  const body = document.querySelector("#compose-body").value.trim();
+  const recipient = document.querySelector("#compose-to").value.trim();
+  const subject = document.querySelector("#compose-subject").value.trim();
+  const connectionId = selectedComposeConnectionId();
   if (!sendDate || Number.isNaN(sendDate.getTime()) || sendDate <= new Date()) {
-    setReplyStatus("Choose a future date and time.", true);
-    return;
+    return setComposeStatus("Choose a future date and time.", true);
   }
-  const confirmButton = document.querySelector("#reply-confirm-schedule");
-  confirmButton.disabled = true;
-  confirmButton.textContent = "Scheduling…";
+  if (!body || !recipient || !subject || !connectionId) {
+    return setComposeStatus("Check the recipient, subject, and message before scheduling.", true);
+  }
+  const button = document.querySelector("#compose-confirm-schedule");
+  button.disabled = true;
+  button.textContent = "Scheduling…";
   try {
-    const response = await apiFetch(
-      `/api/dashboard/emails/${encodeURIComponent(selectedEmail.id)}/reply/schedule`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ body: replyBody.value, send_at: sendDate.toISOString() }),
-      },
-    );
+    const path = composeMode === "reply"
+      ? `/api/dashboard/emails/${encodeURIComponent(composeReplyEmail.id)}/reply/schedule`
+      : "/api/dashboard/compose/schedule";
+    const requestBody = composeMode === "reply"
+      ? { body, send_at: sendDate.toISOString() }
+      : { connection_id: connectionId, recipient, subject, body, send_at: sendDate.toISOString() };
+    const response = await apiFetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(requestBody),
+    });
     const payload = await response.json();
-    if (!response.ok) throw new Error(payload.detail || "Could not schedule the reply.");
-    setReplyStatus(`Reply scheduled. The app checks for due replies every five minutes.`);
-    replyScheduleControls.hidden = true;
-    replyDraftArea.hidden = true;
+    if (!response.ok) throw new Error(payload.detail || "Could not schedule the message.");
+    setComposeStatus(`Email scheduled. The timer checks for due messages every five minutes.`);
+    composeScheduleControls.hidden = true;
+    composeDraftArea.hidden = true;
   } catch (error) {
-    setReplyStatus(error.message || "Could not schedule the reply.", true);
+    setComposeStatus(error.message || "Could not schedule the message.", true);
   } finally {
-    confirmButton.disabled = false;
-    confirmButton.textContent = "Confirm schedule";
+    button.disabled = false;
+    button.textContent = "Schedule email";
   }
 }
 
@@ -1073,27 +1131,27 @@ askAiInput.addEventListener("keydown", (event) => {
 document.querySelector("#empty-connect").addEventListener("click", connectGmail);
 document.querySelector("#close-email-dialog").addEventListener("click", () => emailDialog.close());
 replyOpenButton.addEventListener("click", () => {
-  replyComposer.hidden = false;
-  document.querySelector("#reply-recipient").textContent = selectedEmail?.from || "Checking recipient when draft is generated";
-  document.querySelector("#reply-subject").textContent = `Re: ${selectedEmail?.subject || "Email"}`;
-  setReplyStatus("The AI creates a draft only. Review it before sending or scheduling.");
-  replyInstruction.focus();
+  if (!selectedEmail) return;
+  emailDialog.close();
+  openComposer("reply", selectedEmail);
 });
-document.querySelector("#reply-close").addEventListener("click", () => {
-  replyComposer.hidden = true;
-});
-replyGenerateButton.addEventListener("click", () => void generateReplyDraft());
-replyAuthorizeButton.addEventListener("click", () => void authorizeGmailSending());
-replySendButton.addEventListener("click", () => void sendReplyNow());
-document.querySelector("#reply-show-schedule").addEventListener("click", () => {
-  const input = document.querySelector("#reply-send-at");
+document.querySelector("#compose-open").addEventListener("click", () => openComposer("new"));
+document.querySelector("#compose-close").addEventListener("click", () => composeDialog.close());
+composeGenerateButton.addEventListener("click", () => void generateComposeDraft());
+document.querySelector("#compose-authorize").addEventListener("click", () => void authorizeGmailSending());
+composeSendButton.addEventListener("click", () => void sendComposedMessage());
+document.querySelector("#compose-show-schedule").addEventListener("click", () => {
+  const input = document.querySelector("#compose-send-at");
   const now = new Date();
   now.setMinutes(now.getMinutes() + 1);
   input.min = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
-  replyScheduleControls.hidden = false;
+  composeScheduleControls.hidden = false;
   input.focus();
 });
-document.querySelector("#reply-confirm-schedule").addEventListener("click", () => void scheduleReply());
+document.querySelector("#compose-confirm-schedule").addEventListener("click", () => void scheduleComposedMessage());
+composeDialog.addEventListener("click", (event) => {
+  if (event.target === composeDialog) composeDialog.close();
+});
 document.querySelector("#hide-email-button").addEventListener("click", () => hideEmailFromApp());
 emailDialog.addEventListener("click", (event) => {
   if (event.target === emailDialog) emailDialog.close();

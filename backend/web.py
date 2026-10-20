@@ -35,8 +35,11 @@ from .runtime import (
     initial_sync_mailbox,
     process_scheduled_emails,
     create_reply_draft,
+    create_new_email_draft,
     send_approved_reply,
+    send_approved_new_email,
     schedule_approved_reply,
+    schedule_approved_new_email,
     summarize_one_email,
     sync_persistent_mailbox,
 )
@@ -100,6 +103,24 @@ class ReplyBodyRequest(BaseModel):
 
 
 class ScheduledReplyRequest(ReplyBodyRequest):
+    send_at: datetime
+
+
+class ComposeDraftRequest(BaseModel):
+    connection_id: UUID
+    recipient: str = Field(min_length=3, max_length=320)
+    subject: str = Field(min_length=1, max_length=998)
+    instruction: str = Field(min_length=1, max_length=1200)
+
+
+class ComposeMessageRequest(BaseModel):
+    connection_id: UUID
+    recipient: str = Field(min_length=3, max_length=320)
+    subject: str = Field(min_length=1, max_length=998)
+    body: str = Field(min_length=1, max_length=20000)
+
+
+class ScheduledMessageRequest(ComposeMessageRequest):
     send_at: datetime
 
 
@@ -621,6 +642,29 @@ def draft_dashboard_email_reply(
         raise HTTPException(status_code=400, detail="Could not draft a reply. Please try again.") from exc
 
 
+@app.post("/api/dashboard/compose/draft")
+@limiter.shared_limit(f"{MODEL_REQUESTS_PER_MINUTE}/minute", scope="model-requests-per-minute")
+@limiter.shared_limit(f"{MODEL_REQUESTS_PER_DAY}/day", scope="model-requests-per-day")
+def draft_new_email(
+    payload: ComposeDraftRequest,
+    request: Request,
+    user: dict | None = Depends(_require_app_user),
+) -> dict[str, str]:
+    """Generate editable text for a new email without sending it."""
+    if not user:
+        raise HTTPException(status_code=401, detail="Sign in to write an email.")
+    try:
+        return create_new_email_draft(
+            user["id"], str(payload.connection_id), payload.recipient,
+            payload.subject, payload.instruction,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="Gmail account not found.") from exc
+    except Exception as exc:
+        logger.exception("Could not draft a new email")
+        raise HTTPException(status_code=400, detail="Could not draft the email. Please try again.") from exc
+
+
 @app.post("/api/dashboard/emails/{email_id}/reply/send")
 def send_dashboard_email_reply(
     email_id: str,
@@ -641,6 +685,28 @@ def send_dashboard_email_reply(
         raise HTTPException(status_code=400, detail="Could not send the reply. Please try again.") from exc
 
 
+@app.post("/api/dashboard/compose/send")
+def send_new_email(
+    payload: ComposeMessageRequest,
+    user: dict | None = Depends(_require_app_user),
+) -> dict[str, str]:
+    """Send a new email only after the user presses Send and confirms."""
+    if not user:
+        raise HTTPException(status_code=401, detail="Sign in to send an email.")
+    try:
+        return send_approved_new_email(
+            user["id"], str(payload.connection_id), payload.recipient,
+            payload.subject, payload.body,
+        )
+    except GmailSendPermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="Gmail account not found.") from exc
+    except Exception as exc:
+        logger.exception("Could not send approved new email")
+        raise HTTPException(status_code=400, detail="Could not send the email. Please try again.") from exc
+
+
 @app.post("/api/dashboard/emails/{email_id}/reply/schedule")
 def schedule_dashboard_email_reply(
     email_id: str,
@@ -659,6 +725,28 @@ def schedule_dashboard_email_reply(
     except Exception as exc:
         logger.exception("Could not schedule approved email reply")
         raise HTTPException(status_code=400, detail="Could not schedule the reply. Please try again.") from exc
+
+
+@app.post("/api/dashboard/compose/schedule")
+def schedule_new_email(
+    payload: ScheduledMessageRequest,
+    user: dict | None = Depends(_require_app_user),
+) -> dict[str, str]:
+    """Store the final user-approved new email for the existing timer."""
+    if not user:
+        raise HTTPException(status_code=401, detail="Sign in to schedule an email.")
+    try:
+        return schedule_approved_new_email(
+            user["id"], str(payload.connection_id), payload.recipient,
+            payload.subject, payload.body, payload.send_at,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="Gmail account not found.") from exc
+    except Exception as exc:
+        logger.exception("Could not schedule approved new email")
+        raise HTTPException(status_code=400, detail="Could not schedule the email. Please try again.") from exc
 
 
 @app.post("/api/dashboard/emails/{email_id}/summary")

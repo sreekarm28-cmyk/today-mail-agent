@@ -1,15 +1,17 @@
 # Today Mail Agent
 
-A small Gmail dashboard that shows messages from the last 24 hours, classifies them with an LLM, applies Gmail labels, and summarizes a selected email.
+A Gmail dashboard that saves recent email data in Supabase, classifies messages, applies Gmail labels, and lets you summarize, ask questions, reply, compose, and schedule email.
 
 ## How it works
 
-- **Frontend:** `frontend/` contains the dashboard.
-- **Backend:** `backend/` handles sign-in, Gmail, classification, summaries, and orchestration.
-- **Supabase:** app accounts, encrypted Gmail refresh tokens, saved email details, and readable email bodies. The dashboard and Ask AI read saved data from Supabase.
-- **Ask AI:** searches the signed-in user's saved emails from the last 24 hours, sends up to five relevant matches to the configured model, and returns links to source emails.
-- **OpenRouter:** sends classification, summary, and Ask AI requests to the configured model.
-- **GitHub Actions:** calls Render about every 30 minutes to classify new messages and refresh the cache, even when nobody has the dashboard open.
+- **Frontend:** `frontend/` contains the dashboard and sends requests to the backend.
+- **Backend:** `backend/` handles sign-in, Gmail access, AI requests, database updates, and scheduled work.
+- **Supabase:** stores app accounts, encrypted Gmail refresh tokens, recent email details and bodies, and scheduled messages. The frontend reads email data through the backend.
+- **Classification and Gmail labels:** the backend sends eligible unlabeled emails to the configured model, checks its category choices, then applies valid labels through Gmail and saves the result in Supabase.
+- **Summaries and Ask AI:** the backend loads saved email content from Supabase and sends the needed content to the configured model. Ask AI searches recent saved emails before answering.
+- **Reply and compose:** AI can prepare editable draft text using your instruction. You can review and edit the draft. Immediate sending happens only when you click Send; scheduling saves the message for a later send.
+- **GitHub Actions:** every five minutes, calls Render to process recent emails and send due scheduled messages. The job can run while the dashboard is closed.
+- **OpenRouter:** sends classification, summary, Ask AI, and draft requests to the selected model.
 - **Langfuse:** optional model-call tracing.
 - **Backend timing logs:** `APP_TIMING` entries show request-correlated durations for Gmail, Supabase, and model steps in the service logs.
 
@@ -36,6 +38,7 @@ A small Gmail dashboard that shows messages from the last 24 hours, classifies t
 
 - Run tests: `py -m pytest backend/tests -v`
 - Run the baseline and current classification evaluations: `py -m evals.run_eval --compare` (34 model calls; may use OpenRouter credits).
+- The evaluation has not been run yet. We’ll discuss it before running it because it makes model requests and may use credits.
 - Summary rate limits are set by `MODEL_REQUESTS_PER_MINUTE` and `MODEL_REQUESTS_PER_DAY` in `backend/web.py`.
 
 ## Deploy
@@ -59,7 +62,7 @@ To enable Ask AI, run `supabase/migrations/202610180001_recent_email_search.sql`
 
 - Gmail access is granted through Google OAuth; the app never asks for a Gmail password.
 - Supabase stores saved email details and bodies. The dashboard and Ask AI show/search only the rolling last 24 hours; hidden or deleted emails are excluded.
+- Gmail sending requires the separate Google sending permission. AI-generated text is a draft for you to review. Immediate sending happens only after you click Send; scheduled messages are sent on a timer run after their due time, so delivery may be delayed by a few minutes.
 - Timing logs include request IDs, step names, durations, and counts; they do not include email text, email addresses, or tokens.
 - Langfuse is optional. Traces include model timings and token counts, not email bodies or summary text.
 - Google may require OAuth verification and a security assessment before a public release that uses Gmail's restricted `gmail.modify` scope.
-- This app does not send or reply to emails.

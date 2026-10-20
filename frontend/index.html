@@ -140,8 +140,36 @@
       <div id="email-dialog-body" class="email-dialog-body" aria-live="polite"></div>
       <div class="email-dialog-footer">
         <span>Email content is shown as readable text from Gmail.</span>
+        <button id="reply-open" class="reply-open-button" type="button" disabled>Reply</button>
         <button id="hide-email-button" class="hide-email-button" type="button">Remove from app</button>
       </div>
+      <section id="reply-composer" class="reply-composer" hidden aria-label="Reply composer">
+        <div class="reply-composer-heading">
+          <div><span class="dialog-kicker">REPLY</span><h3 id="reply-subject">Re: Email</h3></div>
+          <button id="reply-close" class="reply-close-button" type="button">Close</button>
+        </div>
+        <div class="reply-meta"><span>To</span><span id="reply-recipient">Checking recipient…</span></div>
+        <label for="reply-instruction">What should the reply say?</label>
+        <textarea id="reply-instruction" rows="2" maxlength="1200" placeholder="For example: Thank them and say I can attend."></textarea>
+        <div class="reply-composer-actions">
+          <button id="reply-generate" class="reply-generate-button" type="button">Generate draft</button>
+          <button id="reply-authorize" class="reply-secondary-button" type="button">Enable Gmail sending</button>
+        </div>
+        <div id="reply-status" class="reply-status" role="status" aria-live="polite" hidden></div>
+        <div id="reply-draft-area" class="reply-draft-area" hidden>
+          <label for="reply-body">Review and edit your reply</label>
+          <textarea id="reply-body" rows="7" maxlength="20000"></textarea>
+          <div class="reply-send-actions">
+            <button id="reply-send-now" class="reply-send-button" type="button">Send now</button>
+            <button id="reply-show-schedule" class="reply-secondary-button" type="button">Schedule</button>
+          </div>
+          <div id="reply-schedule-controls" class="reply-schedule-controls" hidden>
+            <label for="reply-send-at">Send date and time</label>
+            <input id="reply-send-at" type="datetime-local">
+            <button id="reply-confirm-schedule" class="reply-send-button" type="button">Confirm schedule</button>
+          </div>
+        </div>
+      </section>
     </dialog>
     <dialog id="summary-dialog" class="summary-dialog">
       <div class="dialog-top"><div><span class="dialog-kicker">MAIL SUMMARY</span><h2 id="dialog-subject">Email summary</h2></div><button id="close-dialog" class="close-dialog" type="button" aria-label="Close summary">×</button></div>

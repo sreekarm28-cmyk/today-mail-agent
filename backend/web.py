@@ -6,6 +6,7 @@ import logging
 import os
 from pathlib import Path
 import sys
+from datetime import datetime
 from time import perf_counter
 from typing import Literal
 from uuid import UUID, uuid4
@@ -23,6 +24,7 @@ from .diagnostics import log_timing, reset_request_id, set_request_id
 load_local_settings()
 
 from .email_tool import (
+    GmailSendPermissionError,
     SCOPES,
     connect_gmail_account,
     gmail_account_email,
@@ -32,6 +34,9 @@ from .runtime import (
     answer_question_about_recent_emails,
     initial_sync_mailbox,
     process_scheduled_emails,
+    create_reply_draft,
+    send_approved_reply,
+    schedule_approved_reply,
     summarize_one_email,
     sync_persistent_mailbox,
 )
@@ -39,6 +44,7 @@ from .user_tokens import (
     GmailAccountLimitError,
     delete_gmail_connection,
     get_gmail_connection_by_email,
+    get_gmail_connection,
     hide_persistent_email,
     get_persistent_email_by_id,
     get_persistent_emails,
@@ -83,6 +89,18 @@ class AskInboxRequest(BaseModel):
     question: str = Field(min_length=1, max_length=500)
     connection_id: UUID | None = None
     history: list[AskInboxHistoryMessage] = Field(default_factory=list, max_length=6)
+
+
+class ReplyDraftRequest(BaseModel):
+    instruction: str = Field(min_length=1, max_length=1200)
+
+
+class ReplyBodyRequest(BaseModel):
+    body: str = Field(min_length=1, max_length=20000)
+
+
+class ScheduledReplyRequest(ReplyBodyRequest):
+    send_at: datetime
 
 
 @app.middleware("http")
@@ -312,6 +330,53 @@ def connect_gmail(
         raise HTTPException(status_code=400, detail="Something went wrong. Please try again.") from exc
 
 
+@app.post("/api/gmail/accounts/{connection_id}/authorize-send")
+def authorize_gmail_sending(
+    connection_id: UUID,
+    response: Response,
+    user: dict | None = Depends(_require_app_user),
+) -> dict[str, str]:
+    """Start Google consent for Gmail sending without disconnecting the account."""
+    if not user:
+        raise HTTPException(status_code=401, detail="Sign in to update Gmail permissions.")
+    try:
+        connection = get_gmail_connection(user["id"], str(connection_id))
+        if not connection:
+            raise HTTPException(status_code=404, detail="Gmail account not found.")
+        flow = _web_oauth_flow(autogenerate_code_verifier=True)
+        authorization_url, state = flow.authorization_url(
+            access_type="offline",
+            include_granted_scopes="true",
+            prompt="select_account consent",
+        )
+        if not flow.code_verifier:
+            raise RuntimeError("Could not create the Google sign-in verifier.")
+        state_data = json.dumps(
+            {
+                "user_id": user["id"],
+                "connection_id": str(connection_id),
+                "state": state,
+                "code_verifier": flow.code_verifier,
+            }
+        ).encode("utf-8")
+        sealed_state = _oauth_state_cipher().encrypt(state_data).decode("ascii")
+        response.set_cookie(
+            OAUTH_STATE_COOKIE,
+            sealed_state,
+            max_age=600,
+            httponly=True,
+            secure=os.getenv("GOOGLE_OAUTH_REDIRECT_URI", "").startswith("https://"),
+            samesite="lax",
+            path="/",
+        )
+        return {"authorization_url": authorization_url}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Could not start Gmail send-permission consent")
+        raise HTTPException(status_code=503, detail="Could not open Google permission approval.") from exc
+
+
 @app.get("/api/connect-gmail/callback", include_in_schema=False)
 def connect_gmail_callback(
     request: Request,
@@ -344,7 +409,15 @@ def connect_gmail_callback(
         credentials = flow.credentials
         stage = "checking the connected Gmail account"
         gmail_email = gmail_account_email(credentials)
-        existing = get_gmail_connection_by_email(state_data["user_id"], gmail_email)
+        reconnect_connection_id = state_data.get("connection_id")
+        if reconnect_connection_id:
+            existing = get_gmail_connection(state_data["user_id"], reconnect_connection_id)
+            if not existing or existing["email"].casefold() != gmail_email.casefold():
+                redirect = RedirectResponse("/?gmail=wrong_account", status_code=303)
+                redirect.delete_cookie(OAUTH_STATE_COOKIE, path="/")
+                return redirect
+        else:
+            existing = get_gmail_connection_by_email(state_data["user_id"], gmail_email)
         if not credentials.refresh_token and not existing:
             raise RuntimeError("Google did not return a reusable permission. Try connecting again and approve access.")
         if not existing and len(list_user_gmail_connections(state_data["user_id"])) >= 2:
@@ -354,7 +427,8 @@ def connect_gmail_callback(
         refresh_token = credentials.refresh_token or existing["refresh_token"]
         stage = "saving the encrypted Gmail token to Supabase"
         save_gmail_connection(state_data["user_id"], gmail_email, refresh_token)
-        redirect = RedirectResponse("/?gmail=connected", status_code=303)
+        callback_result = "send_enabled" if reconnect_connection_id else "connected"
+        redirect = RedirectResponse(f"/?gmail={callback_result}", status_code=303)
         redirect.delete_cookie(OAUTH_STATE_COOKIE, path="/")
         return redirect
     except Exception as exc:
@@ -521,6 +595,70 @@ def hide_dashboard_email(email_id: str, user: dict | None = Depends(_require_app
     except Exception as exc:
         logger.exception("Could not hide dashboard email")
         raise HTTPException(status_code=400, detail="Could not remove this email. Please try again.") from exc
+
+
+@app.post("/api/dashboard/emails/{email_id}/reply/draft")
+@limiter.shared_limit(f"{MODEL_REQUESTS_PER_MINUTE}/minute", scope="model-requests-per-minute")
+@limiter.shared_limit(f"{MODEL_REQUESTS_PER_DAY}/day", scope="model-requests-per-day")
+def draft_dashboard_email_reply(
+    email_id: str,
+    payload: ReplyDraftRequest,
+    request: Request,
+    user: dict | None = Depends(_require_app_user),
+) -> dict[str, str]:
+    """Generate editable reply text from a saved email; never send from this route."""
+    if not user:
+        raise HTTPException(status_code=401, detail="Sign in to draft a reply.")
+    instruction = payload.instruction.strip()
+    if not instruction:
+        raise HTTPException(status_code=422, detail="Tell the AI what you want the reply to say.")
+    try:
+        return create_reply_draft(user["id"], email_id, instruction)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="Email not found in your inbox.") from exc
+    except Exception as exc:
+        logger.exception("Could not draft a reply")
+        raise HTTPException(status_code=400, detail="Could not draft a reply. Please try again.") from exc
+
+
+@app.post("/api/dashboard/emails/{email_id}/reply/send")
+def send_dashboard_email_reply(
+    email_id: str,
+    payload: ReplyBodyRequest,
+    user: dict | None = Depends(_require_app_user),
+) -> dict[str, str]:
+    """Send the user-edited reply only after they press the Send button."""
+    if not user:
+        raise HTTPException(status_code=401, detail="Sign in to send a reply.")
+    try:
+        return send_approved_reply(user["id"], email_id, payload.body)
+    except GmailSendPermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="Email not found in your inbox.") from exc
+    except Exception as exc:
+        logger.exception("Could not send approved email reply")
+        raise HTTPException(status_code=400, detail="Could not send the reply. Please try again.") from exc
+
+
+@app.post("/api/dashboard/emails/{email_id}/reply/schedule")
+def schedule_dashboard_email_reply(
+    email_id: str,
+    payload: ScheduledReplyRequest,
+    user: dict | None = Depends(_require_app_user),
+) -> dict[str, str]:
+    """Save a user-approved reply for the existing scheduled worker."""
+    if not user:
+        raise HTTPException(status_code=401, detail="Sign in to schedule a reply.")
+    try:
+        return schedule_approved_reply(user["id"], email_id, payload.body, payload.send_at)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="Email not found in your inbox.") from exc
+    except Exception as exc:
+        logger.exception("Could not schedule approved email reply")
+        raise HTTPException(status_code=400, detail="Could not schedule the reply. Please try again.") from exc
 
 
 @app.post("/api/dashboard/emails/{email_id}/summary")

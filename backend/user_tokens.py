@@ -514,6 +514,49 @@ def get_persistent_email_by_id(user_id: str, email_id: str) -> dict | None:
     }
 
 
+def save_scheduled_reply(user_id: str, values: dict) -> dict:
+    """Save a user-approved reply for the scheduled backend worker."""
+    rows = _request(
+        "POST",
+        "scheduled_replies?select=id,status,send_at",
+        {"user_id": user_id, **values},
+        prefer="return=representation",
+    )
+    if not isinstance(rows, list) or not rows:
+        raise RuntimeError("Supabase did not return the scheduled reply.")
+    return rows[0]
+
+
+def claim_due_scheduled_replies(limit: int = 20) -> list[dict]:
+    """Atomically claim due replies so overlapping timer runs do not duplicate work."""
+    rows = _request("POST", "rpc/claim_due_scheduled_replies", {"p_limit": limit})
+    if not isinstance(rows, list):
+        raise RuntimeError("Supabase returned an invalid scheduled reply list.")
+    return rows
+
+
+def update_scheduled_reply_status(
+    reply_id: str,
+    user_id: str,
+    status: str,
+    *,
+    sent_at: str | None = None,
+    last_error: str | None = None,
+) -> bool:
+    """Finish a claimed scheduled reply with a safe status and no provider details."""
+    values = {"status": status, "last_error": last_error}
+    if sent_at:
+        values["sent_at"] = sent_at
+    rows = _request(
+        "PATCH",
+        "scheduled_replies?select=id&"
+        f"id=eq.{quote(reply_id, safe='')}&user_id=eq.{quote(user_id, safe='')}&status=eq.sending",
+        values,
+        prefer="return=representation",
+    )
+    return isinstance(rows, list) and bool(rows)
+
+
 def search_recent_persistent_emails(
     user_id: str,
     query: str,

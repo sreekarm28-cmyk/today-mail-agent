@@ -1,8 +1,10 @@
 """Read recent Gmail messages using Google OAuth and the Gmail API."""
 
 from datetime import datetime, timedelta, timezone
-from email import message_from_bytes
+from email import message_from_bytes, policy
 from email.header import decode_header
+from email.message import EmailMessage
+from email.utils import getaddresses
 from html.parser import HTMLParser
 import base64
 import json
@@ -16,12 +18,19 @@ import keyring
 from .diagnostics import log_timing
 
 
-SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
+SCOPES = [
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/gmail.send",
+]
 APP_DATA_DIR = Path(os.getenv("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "TodayMailAgent"
 OAUTH_CLIENT_FILE = APP_DATA_DIR / "credentials.json"
 _CREDENTIAL_SERVICE = "today-mail-agent"
 _TOKEN_KEY_NAME = "GOOGLE_OAUTH_TOKEN"
 GMAIL_RAW_BATCH_SIZE = 10
+
+
+class GmailSendPermissionError(RuntimeError):
+    """The connected Gmail account has not granted permission to send mail."""
 
 
 class _HTMLText(HTMLParser):
@@ -212,6 +221,79 @@ def gmail_account_email(credentials) -> str:
     """Return the email address belonging to an OAuth credential set."""
     profile = _gmail_service(credentials=credentials).users().getProfile(userId="me").execute()
     return profile.get("emailAddress", "")
+
+
+def get_gmail_reply_context(
+    user_id: str, connection_id: str, gmail_message_id: str
+) -> dict[str, str]:
+    """Read Gmail headers needed to address and thread a reply correctly."""
+    started = perf_counter()
+    message = _gmail_service(user_id, connection_id).users().messages().get(
+        userId="me",
+        id=gmail_message_id,
+        format="metadata",
+        metadataHeaders=["From", "Reply-To", "Subject", "Message-ID", "References"],
+    ).execute()
+    headers = {
+        str(item.get("name", "")).lower(): str(item.get("value", ""))
+        for item in (message.get("payload") or {}).get("headers", [])
+        if isinstance(item, dict)
+    }
+    recipient_header = headers.get("reply-to") or headers.get("from", "")
+    addresses = getaddresses([recipient_header])
+    recipient = next((address for _, address in addresses if address), "")
+    message_id = headers.get("message-id", "").strip()
+    thread_id = str(message.get("threadId") or "")
+    if not recipient or not message_id or not thread_id:
+        raise RuntimeError("Gmail did not provide enough message details to reply safely.")
+    log_timing("gmail.reply_context", started)
+    original_subject = _decode(headers.get("subject")) or "(No subject)"
+    return {
+        "recipient": recipient,
+        "subject": original_subject,
+        "thread_id": thread_id,
+        "gmail_message_id": gmail_message_id,
+        "in_reply_to_message_id": message_id,
+        "references_header": headers.get("references", "").strip(),
+    }
+
+
+def send_gmail_reply(
+    user_id: str,
+    connection_id: str,
+    reply_context: dict[str, str],
+    body: str,
+) -> str:
+    """Send an explicitly approved reply into the original Gmail thread."""
+    if not body.strip():
+        raise ValueError("Reply text cannot be empty.")
+    message = EmailMessage(policy=policy.SMTP)
+    message["To"] = reply_context["recipient"]
+    subject = reply_context["subject"]
+    message["Subject"] = subject if subject.lower().startswith("re:") else f"Re: {subject}"
+    original_message_id = reply_context["in_reply_to_message_id"]
+    message["In-Reply-To"] = original_message_id
+    references = reply_context.get("references_header", "").strip()
+    message["References"] = f"{references} {original_message_id}".strip()
+    message.set_content(body.strip())
+    raw = base64.urlsafe_b64encode(message.as_bytes()).decode("ascii").rstrip("=")
+
+    started = perf_counter()
+    try:
+        result = _gmail_service(user_id, connection_id).users().messages().send(
+            userId="me",
+            body={"raw": raw, "threadId": reply_context["thread_id"]},
+        ).execute()
+    except Exception as exc:
+        if getattr(getattr(exc, "resp", None), "status", None) == 403:
+            raise GmailSendPermissionError(
+                "Approve Gmail's send permission before sending replies."
+            ) from exc
+        raise
+    if not isinstance(result, dict) or not result.get("id"):
+        raise RuntimeError("Gmail did not confirm that the reply was sent.")
+    log_timing("gmail.send_reply", started)
+    return str(result["id"])
 
 
 def prepare_initial_mailbox_sync(user_id: str, days: int, connection_id: str):

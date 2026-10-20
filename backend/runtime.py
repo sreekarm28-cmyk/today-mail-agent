@@ -17,6 +17,8 @@ from .email_tool import (
     get_gmail_reply_context,
     send_gmail_reply,
     send_gmail_message,
+    find_sent_gmail_message,
+    GmailDeliveryUnknownError,
 )
 from .diagnostics import log_timing
 from .llm import OPENROUTER_EMBEDDING_MODEL, chat, embed_texts
@@ -978,10 +980,18 @@ def schedule_approved_new_email(
     return {"status": saved.get("status", "pending"), "send_at": saved["send_at"]}
 
 
+def _scheduled_rfc_message_id(schedule_id: str) -> str:
+    """Create a stable ID so a scheduled send can be found in Gmail Sent."""
+    return f"<scheduled-{schedule_id}@today-mail-agent.invalid>"
+
+
 def process_due_scheduled_replies(limit: int = 20) -> dict[str, int]:
     """Claim and send replies due now; called by the existing GitHub timer."""
     rows = claim_due_scheduled_replies(limit)
-    result = {"replies_checked": len(rows), "replies_sent": 0, "replies_failed": 0}
+    result = {
+        "replies_checked": len(rows), "replies_sent": 0,
+        "replies_failed": 0, "replies_unknown": 0,
+    }
     for row in rows:
         user_id = row.get("user_id")
         connection_id = row.get("connection_id")
@@ -994,80 +1004,168 @@ def process_due_scheduled_replies(limit: int = 20) -> dict[str, int]:
             "in_reply_to_message_id": row.get("in_reply_to_message_id", ""),
             "references_header": row.get("references_header", ""),
         }
+        if not user_id or not connection_id or not reply_id:
+            logger.error("Scheduled reply is missing required ownership data.")
+            result["replies_failed"] += 1
+            continue
+
+        message_id = _scheduled_rfc_message_id(reply_id)
         try:
-            if not user_id or not connection_id or not reply_id:
-                raise RuntimeError("Scheduled reply is missing required ownership data.")
-            send_gmail_reply(user_id, connection_id, context, row.get("body", ""))
+            sent_id = find_sent_gmail_message(user_id, connection_id, message_id)
+            if not sent_id:
+                sent_id = send_gmail_reply(
+                    user_id, connection_id, context, row.get("body", ""),
+                    message_id=message_id,
+                )
+        except GmailDeliveryUnknownError as exc:
+            logger.warning(
+                "Scheduled reply delivery is uncertain (%s).", type(exc).__name__
+            )
+            result["replies_unknown"] += 1
+            try:
+                update_scheduled_reply_status(
+                    reply_id, user_id, "delivery_unknown",
+                    last_error="Gmail may have sent this reply. Check Sent before retrying.",
+                )
+            except Exception as status_exc:
+                logger.error("Could not record uncertain reply delivery (%s).", type(status_exc).__name__)
+            continue
+        except Exception as exc:
+            logger.warning(
+                "Scheduled reply failed before confirmed delivery (%s).",
+                type(exc).__name__,
+            )
+            result["replies_failed"] += 1
+            try:
+                update_scheduled_reply_status(
+                    reply_id, user_id, "failed",
+                    last_error="Gmail rejected the reply. Reopen the app to review it.",
+                )
+            except Exception as status_exc:
+                logger.error(
+                    "Could not record scheduled reply failure (%s).",
+                    type(status_exc).__name__,
+                )
+            continue
+
+        try:
             updated = update_scheduled_reply_status(
                 reply_id,
                 user_id,
                 "sent",
                 sent_at=datetime.now(timezone.utc).isoformat(),
+                sent_gmail_message_id=sent_id,
             )
             if not updated:
-                raise RuntimeError("Could not mark the scheduled reply as sent.")
+                raise RuntimeError("Supabase did not update the scheduled reply.")
             result["replies_sent"] += 1
         except Exception as exc:
-            logger.warning("Scheduled reply failed (%s).", type(exc).__name__)
-            result["replies_failed"] += 1
-            if user_id and reply_id:
-                try:
-                    update_scheduled_reply_status(
-                        reply_id,
-                        user_id,
-                        "failed",
-                        last_error="Delivery failed. Reopen the app to review and retry.",
-                    )
-                except Exception as status_exc:
-                    logger.error(
-                        "Could not record scheduled reply failure (%s).",
-                        type(status_exc).__name__,
-                    )
+            logger.error(
+                "Reply was sent or found in Sent, but its database status could not be saved (%s).",
+                type(exc).__name__,
+            )
+            result["replies_unknown"] += 1
+            try:
+                update_scheduled_reply_status(
+                    reply_id, user_id, "delivery_unknown",
+                    sent_gmail_message_id=sent_id,
+                    last_error="Gmail has a sent reply, but the saved status needs repair. Do not retry.",
+                )
+            except Exception as status_exc:
+                logger.error(
+                    "Could not record uncertain reply status (%s); it will remain non-retryable.",
+                    type(status_exc).__name__,
+                )
     return result
 
 
 def process_due_scheduled_messages(limit: int = 20) -> dict[str, int]:
     """Send due new emails and record each result for the existing timer."""
     rows = claim_due_scheduled_messages(limit)
-    result = {"messages_checked": len(rows), "messages_sent": 0, "messages_failed": 0}
+    result = {
+        "messages_checked": len(rows), "messages_sent": 0,
+        "messages_failed": 0, "messages_unknown": 0,
+    }
     for row in rows:
         user_id = row.get("user_id")
         message_id = row.get("id")
+        connection_id = row.get("connection_id")
+        if not user_id or not connection_id or not message_id:
+            logger.error("Scheduled email is missing required ownership data.")
+            result["messages_failed"] += 1
+            continue
+
+        rfc_message_id = _scheduled_rfc_message_id(message_id)
         try:
-            if not user_id or not row.get("connection_id") or not message_id:
-                raise RuntimeError("Scheduled email is missing required ownership data.")
-            send_gmail_message(
-                user_id,
-                row["connection_id"],
-                row.get("recipient_email", ""),
-                row.get("subject", ""),
-                row.get("body", ""),
+            sent_id = find_sent_gmail_message(user_id, connection_id, rfc_message_id)
+            if not sent_id:
+                sent_id = send_gmail_message(
+                    user_id,
+                    connection_id,
+                    row.get("recipient_email", ""),
+                    row.get("subject", ""),
+                    row.get("body", ""),
+                    message_id=rfc_message_id,
+                )
+        except GmailDeliveryUnknownError as exc:
+            logger.warning(
+                "Scheduled email delivery is uncertain (%s).", type(exc).__name__
             )
+            result["messages_unknown"] += 1
+            try:
+                update_scheduled_message_status(
+                    message_id, user_id, "delivery_unknown",
+                    last_error="Gmail may have sent this email. Check Sent before retrying.",
+                )
+            except Exception as status_exc:
+                logger.error("Could not record uncertain email delivery (%s).", type(status_exc).__name__)
+            continue
+        except Exception as exc:
+            logger.warning(
+                "Scheduled email failed before confirmed delivery (%s).",
+                type(exc).__name__,
+            )
+            result["messages_failed"] += 1
+            try:
+                update_scheduled_message_status(
+                    message_id, user_id, "failed",
+                    last_error="Gmail rejected the email. Reopen the app to review it.",
+                )
+            except Exception as status_exc:
+                logger.error(
+                    "Could not record scheduled email failure (%s).",
+                    type(status_exc).__name__,
+                )
+            continue
+
+        try:
             updated = update_scheduled_message_status(
                 message_id,
                 user_id,
                 "sent",
                 sent_at=datetime.now(timezone.utc).isoformat(),
+                sent_gmail_message_id=sent_id,
             )
             if not updated:
-                raise RuntimeError("Could not mark the scheduled email as sent.")
+                raise RuntimeError("Supabase did not update the scheduled email.")
             result["messages_sent"] += 1
         except Exception as exc:
-            logger.warning("Scheduled email failed (%s).", type(exc).__name__)
-            result["messages_failed"] += 1
-            if user_id and message_id:
-                try:
-                    update_scheduled_message_status(
-                        message_id,
-                        user_id,
-                        "failed",
-                        last_error="Delivery failed. Reopen the app to review and retry.",
-                    )
-                except Exception as status_exc:
-                    logger.error(
-                        "Could not record scheduled email failure (%s).",
-                        type(status_exc).__name__,
-                    )
+            logger.error(
+                "Email was sent or found in Sent, but its database status could not be saved (%s).",
+                type(exc).__name__,
+            )
+            result["messages_unknown"] += 1
+            try:
+                update_scheduled_message_status(
+                    message_id, user_id, "delivery_unknown",
+                    sent_gmail_message_id=sent_id,
+                    last_error="Gmail has a sent email, but the saved status needs repair. Do not retry.",
+                )
+            except Exception as status_exc:
+                logger.error(
+                    "Could not record uncertain email status (%s); it will remain non-retryable.",
+                    type(status_exc).__name__,
+                )
     return result
 
 

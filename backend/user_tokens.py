@@ -672,12 +672,15 @@ def update_scheduled_reply_status(
     status: str,
     *,
     sent_at: str | None = None,
+    sent_gmail_message_id: str | None = None,
     last_error: str | None = None,
 ) -> bool:
     """Finish a claimed scheduled reply with a safe status and no provider details."""
     values = {"status": status, "last_error": last_error}
     if sent_at:
         values["sent_at"] = sent_at
+    if sent_gmail_message_id:
+        values["sent_gmail_message_id"] = sent_gmail_message_id
     rows = _request(
         "PATCH",
         "scheduled_replies?select=id&"
@@ -694,12 +697,15 @@ def update_scheduled_message_status(
     status: str,
     *,
     sent_at: str | None = None,
+    sent_gmail_message_id: str | None = None,
     last_error: str | None = None,
 ) -> bool:
     """Update a claimed scheduled new email without exposing provider details."""
     values = {"status": status, "last_error": last_error}
     if sent_at:
         values["sent_at"] = sent_at
+    if sent_gmail_message_id:
+        values["sent_gmail_message_id"] = sent_gmail_message_id
     rows = _request(
         "PATCH",
         "scheduled_messages?select=id&"

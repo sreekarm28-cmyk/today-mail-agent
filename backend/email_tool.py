@@ -33,6 +33,10 @@ class GmailSendPermissionError(RuntimeError):
     """The connected Gmail account has not granted permission to send mail."""
 
 
+class GmailDeliveryUnknownError(RuntimeError):
+    """Gmail may have accepted a message, but the client did not get confirmation."""
+
+
 class _HTMLText(HTMLParser):
     """Collect readable text from an HTML-only email body."""
 
@@ -263,6 +267,8 @@ def send_gmail_reply(
     connection_id: str,
     reply_context: dict[str, str],
     body: str,
+    *,
+    message_id: str | None = None,
 ) -> str:
     """Send an explicitly approved reply into the original Gmail thread."""
     if not body.strip():
@@ -275,23 +281,33 @@ def send_gmail_reply(
     message["In-Reply-To"] = original_message_id
     references = reply_context.get("references_header", "").strip()
     message["References"] = f"{references} {original_message_id}".strip()
+    if message_id:
+        message["Message-ID"] = message_id
     message.set_content(body.strip())
     raw = base64.urlsafe_b64encode(message.as_bytes()).decode("ascii").rstrip("=")
 
     started = perf_counter()
+    service = _gmail_service(user_id, connection_id)
     try:
-        result = _gmail_service(user_id, connection_id).users().messages().send(
+        result = service.users().messages().send(
             userId="me",
             body={"raw": raw, "threadId": reply_context["thread_id"]},
         ).execute()
     except Exception as exc:
-        if getattr(getattr(exc, "resp", None), "status", None) == 403:
+        status = getattr(getattr(exc, "resp", None), "status", None)
+        if status == 403:
             raise GmailSendPermissionError(
                 "Approve Gmail's send permission before sending replies."
             ) from exc
-        raise
+        if isinstance(status, int) and 400 <= status < 500:
+            raise
+        raise GmailDeliveryUnknownError(
+            "Gmail may have accepted the reply, but did not confirm the result."
+        ) from exc
     if not isinstance(result, dict) or not result.get("id"):
-        raise RuntimeError("Gmail did not confirm that the reply was sent.")
+        raise GmailDeliveryUnknownError(
+            "Gmail may have accepted the reply, but did not confirm the result."
+        )
     log_timing("gmail.send_reply", started)
     return str(result["id"])
 
@@ -302,6 +318,8 @@ def send_gmail_message(
     recipient: str,
     subject: str,
     body: str,
+    *,
+    message_id: str | None = None,
 ) -> str:
     """Send a new email after the user has reviewed and approved its text."""
     addresses = getaddresses([recipient])
@@ -313,23 +331,52 @@ def send_gmail_message(
     message = EmailMessage(policy=policy.SMTP)
     message["To"] = ", ".join(parsed)
     message["Subject"] = subject.strip()
+    if message_id:
+        message["Message-ID"] = message_id
     message.set_content(body.strip())
     raw = base64.urlsafe_b64encode(message.as_bytes()).decode("ascii").rstrip("=")
     started = perf_counter()
+    service = _gmail_service(user_id, connection_id)
     try:
-        result = _gmail_service(user_id, connection_id).users().messages().send(
+        result = service.users().messages().send(
             userId="me", body={"raw": raw}
         ).execute()
     except Exception as exc:
-        if getattr(getattr(exc, "resp", None), "status", None) == 403:
+        status = getattr(getattr(exc, "resp", None), "status", None)
+        if status == 403:
             raise GmailSendPermissionError(
                 "Approve Gmail's send permission before sending messages."
             ) from exc
-        raise
+        if isinstance(status, int) and 400 <= status < 500:
+            raise
+        raise GmailDeliveryUnknownError(
+            "Gmail may have accepted the email, but did not confirm the result."
+        ) from exc
     if not isinstance(result, dict) or not result.get("id"):
-        raise RuntimeError("Gmail did not confirm that the email was sent.")
+        raise GmailDeliveryUnknownError(
+            "Gmail may have accepted the email, but did not confirm the result."
+        )
     log_timing("gmail.send_message", started)
     return str(result["id"])
+
+
+def find_sent_gmail_message(
+    user_id: str, connection_id: str, message_id: str
+) -> str | None:
+    """Find a previously sent message using its stable RFC Message-ID header."""
+    query_id = message_id.strip().removeprefix("<").removesuffix(">")
+    if not query_id:
+        return None
+    response = _gmail_service(user_id, connection_id).users().messages().list(
+        userId="me",
+        q=f"in:sent rfc822msgid:{query_id}",
+        maxResults=1,
+    ).execute()
+    messages = response.get("messages", []) if isinstance(response, dict) else []
+    if not messages or not isinstance(messages[0], dict):
+        return None
+    found_id = messages[0].get("id")
+    return str(found_id) if found_id else None
 
 
 def prepare_initial_mailbox_sync(user_id: str, days: int, connection_id: str):

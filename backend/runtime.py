@@ -13,13 +13,16 @@ from .email_tool import (
     fetch_gmail_history_changes,
     prepare_initial_mailbox_sync,
     prepare_incremental_mailbox_sync,
+    normalize_email_body,
 )
 from .diagnostics import log_timing
-from .llm import chat
+from .llm import OPENROUTER_EMBEDDING_MODEL, chat, embed_texts
 from .observability import flush_client, get_langfuse_client, observation, record_metadata
 from .user_tokens import (
     acquire_mailbox_sync_lock,
     get_gmail_connection,
+    get_email_embedding_chunks,
+    get_recent_email_bodies_for_embedding,
     get_mailbox_sync_state,
     get_persistent_gmail_ids_since,
     get_unlabeled_mailbox_emails,
@@ -29,6 +32,8 @@ from .user_tokens import (
     mark_mailbox_emails_deleted,
     release_mailbox_sync_lock,
     search_recent_persistent_emails,
+    search_email_embedding_chunks,
+    save_email_embedding_chunks,
     save_mailbox_sync_state,
     update_mailbox_email,
     update_mailbox_sync_state,
@@ -218,6 +223,133 @@ def classify_batch(
     return categories_by_id
 
 
+EMAIL_EMBEDDING_CHUNK_CHARS = 1400
+EMAIL_EMBEDDING_CHUNK_OVERLAP_CHARS = 180
+EMAIL_EMBEDDING_BATCH_SIZE = 16
+
+
+def _split_email_body(body: str) -> list[str]:
+    """Split normalized body text into small overlapping chunks."""
+    text = normalize_email_body(body)
+    if not text:
+        return []
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = min(start + EMAIL_EMBEDDING_CHUNK_CHARS, len(text))
+        if end < len(text):
+            boundary = text.rfind(" ", start + EMAIL_EMBEDDING_CHUNK_CHARS // 2, end)
+            if boundary > start:
+                end = boundary
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+        if end >= len(text):
+            break
+        start = max(start + 1, end - EMAIL_EMBEDDING_CHUNK_OVERLAP_CHARS)
+        while start < len(text) and text[start].isspace():
+            start += 1
+    return chunks
+
+
+def _index_recent_email_bodies(
+    user_id: str,
+    connection_id: str,
+    force_email_ids: list[str] | None = None,
+) -> tuple[int, int]:
+    """Embed missing or changed recent bodies; keep Gmail sync usable on failure."""
+    started = perf_counter()
+    emails = get_recent_email_bodies_for_embedding(
+        user_id, connection_id, force_email_ids=force_email_ids
+    )
+    if not emails:
+        log_timing(
+            "embedding.index_recent_mail",
+            started,
+            email_count=0,
+            indexed=0,
+            failed=0,
+        )
+        return 0, 0
+
+    saved_chunks = get_email_embedding_chunks(user_id, [email["id"] for email in emails])
+    prepared = []
+    for email in emails:
+        body_chunks = _split_email_body(email.get("body") or "")
+        chunk_texts = [
+            f"Subject: {email.get('subject', '(No subject)')}\n"
+            f"From: {email.get('sender', '')}\n\n{chunk}"
+            for chunk in body_chunks
+        ]
+        previous = saved_chunks.get(email["id"], [])
+        if previous == chunk_texts:
+            continue
+        # Remove stale vectors before requesting replacements. If the model is
+        # temporarily unavailable, the next sync will see this email as pending.
+        if previous:
+            save_email_embedding_chunks(user_id, email["id"], [])
+        if not chunk_texts:
+            continue
+        prepared.append({"email": email, "chunk_texts": chunk_texts})
+
+    flat_chunks = [
+        (item["email"]["id"], index, text)
+        for item in prepared
+        for index, text in enumerate(item["chunk_texts"])
+    ]
+    vectors_by_email: dict[str, list[list[float] | None]] = {
+        item["email"]["id"]: [None] * len(item["chunk_texts"])
+        for item in prepared
+    }
+    failed_email_ids = set()
+    for offset in range(0, len(flat_chunks), EMAIL_EMBEDDING_BATCH_SIZE):
+        batch = flat_chunks[offset : offset + EMAIL_EMBEDDING_BATCH_SIZE]
+        try:
+            vectors = embed_texts([item[2] for item in batch], input_type="passage")
+            for (email_id, chunk_index, _), vector in zip(batch, vectors):
+                vectors_by_email[email_id][chunk_index] = vector
+        except Exception as exc:
+            failed_email_ids.update(item[0] for item in batch)
+            logger.warning(
+                "Embedding failed for %s email chunks (%s); saved email bodies remain available.",
+                len(batch),
+                type(exc).__name__,
+            )
+
+    indexed = failed = 0
+    for item in prepared:
+        email_id = item["email"]["id"]
+        vectors = vectors_by_email[email_id]
+        if email_id in failed_email_ids or any(vector is None for vector in vectors):
+            failed += 1
+            continue
+        rows = [
+            {
+                "chunk_text": text,
+                "embedding": vector,
+                "embedding_model": OPENROUTER_EMBEDDING_MODEL,
+            }
+            for text, vector in zip(item["chunk_texts"], vectors)
+        ]
+        try:
+            save_email_embedding_chunks(user_id, email_id, rows)
+            indexed += 1
+        except Exception as exc:
+            failed += 1
+            logger.warning(
+                "Could not save embeddings for one email (%s).", type(exc).__name__
+            )
+
+    log_timing(
+        "embedding.index_recent_mail",
+        started,
+        email_count=len(emails),
+        indexed=indexed,
+        failed=failed,
+    )
+    return indexed, failed
+
+
 def _initial_sync_mailbox(user_id: str, connection_id: str) -> dict[str, int | str | bool]:
     """Import a user's recent Gmail messages and bodies into the persistent tables once."""
     current_state = get_mailbox_sync_state(user_id, connection_id)
@@ -273,6 +405,18 @@ def _initial_sync_mailbox(user_id: str, connection_id: str) -> dict[str, int | s
         email_count=len(saved_rows),
         body_count=len(body_rows),
     )
+
+    try:
+        _index_recent_email_bodies(
+            user_id,
+            connection_id,
+            force_email_ids=[row["id"] for row in saved_rows.values() if row.get("id")],
+        )
+    except Exception as exc:
+        logger.warning(
+            "Could not prepare recent email embeddings (%s); inbox sync will continue.",
+            type(exc).__name__,
+        )
 
     dashboard_cutoff_ms = int(
         (datetime.now(timezone.utc) - timedelta(hours=24)).timestamp() * 1000
@@ -481,20 +625,35 @@ def _sync_one_persistent_mailbox(user_id: str, connection_id: str) -> dict[str, 
 
         changed_emails = changes["emails"]
         deleted_ids = changes["deleted_ids"]
+        changed_rows = {}
         if changed_emails:
-            rows = upsert_mailbox_emails(user_id, connection_id, changed_emails)
+            changed_rows = upsert_mailbox_emails(user_id, connection_id, changed_emails)
             body_rows = [
                 {
-                    "email_id": rows[email["id"]]["id"],
+                    "email_id": changed_rows[email["id"]]["id"],
                     "user_id": user_id,
                     "body": email.get("body", ""),
                 }
                 for email in changed_emails
-                if email["id"] in rows
+                if email["id"] in changed_rows
             ]
             upsert_mailbox_email_bodies(user_id, body_rows)
         if deleted_ids:
             mark_mailbox_emails_deleted(user_id, connection_id, deleted_ids)
+
+        try:
+            _index_recent_email_bodies(
+                user_id,
+                connection_id,
+                force_email_ids=[
+                    row["id"] for row in changed_rows.values() if row.get("id")
+                ],
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not prepare recent email embeddings (%s); inbox sync will continue.",
+                type(exc).__name__,
+            )
 
         # New and retry-eligible messages use the body already saved in Supabase.
         pending = get_unlabeled_mailbox_emails(user_id, connection_id, limit=500)
@@ -600,6 +759,59 @@ def summarize_one_email(email: dict[str, str]) -> str:
         flush_client(client)
 
 
+def _merge_hybrid_email_matches(
+    word_matches: list[dict], semantic_chunks: list[dict]
+) -> list[dict]:
+    """Merge word matches and vector matches, keeping one source per email."""
+    combined: dict[str, dict] = {}
+    semantic_seen = set()
+    for rank, email in enumerate(word_matches):
+        email_id = email.get("id")
+        if not email_id:
+            continue
+        item = dict(email)
+        item["_hybrid_score"] = 1.0 / (60 + rank + 1)
+        item["_semantic_chunks"] = []
+        combined[email_id] = item
+
+    for rank, chunk in enumerate(semantic_chunks):
+        email_id = chunk.get("email_id")
+        if not email_id:
+            continue
+        item = combined.get(email_id)
+        if item is None:
+            internal_date = int(chunk.get("internal_date") or 0)
+            received = datetime.fromtimestamp(internal_date / 1000, tz=timezone.utc)
+            item = {
+                "id": email_id,
+                "connection_id": chunk.get("connection_id"),
+                "from": chunk.get("sender", ""),
+                "subject": chunk.get("subject", "(No subject)"),
+                "preview": "",
+                "received": received.isoformat(timespec="minutes"),
+                "body": "",
+                "_hybrid_score": 0.0,
+                "_semantic_chunks": [],
+            }
+            combined[email_id] = item
+        if email_id not in semantic_seen:
+            item["_hybrid_score"] += 1.0 / (60 + rank + 1)
+            semantic_seen.add(email_id)
+        text = chunk.get("chunk_text")
+        if isinstance(text, str) and text and text not in item["_semantic_chunks"]:
+            if len(item["_semantic_chunks"]) < 2:
+                item["_semantic_chunks"].append(text)
+
+    for item in combined.values():
+        if item["_semantic_chunks"]:
+            item["body"] = "\n\n---\n\n".join(item["_semantic_chunks"])
+    return sorted(
+        combined.values(),
+        key=lambda item: (item["_hybrid_score"], item.get("received", "")),
+        reverse=True,
+    )[:ASK_AI_MAX_SOURCES]
+
+
 def answer_question_about_recent_emails(
     user_id: str,
     question: str,
@@ -622,15 +834,34 @@ def answer_question_about_recent_emails(
     try:
         with observation(client, as_type="span", name="ask-recent-email") as span:
             try:
-                matches = search_recent_persistent_emails(
+                word_matches = search_recent_persistent_emails(
                     user_id,
                     retrieval_query,
                     connection_id=connection_id,
                     limit=ASK_AI_MAX_SOURCES,
                 )
+                semantic_chunks = []
+                try:
+                    query_embedding = embed_texts(
+                        [retrieval_query], input_type="query"
+                    )[0]
+                    semantic_chunks = search_email_embedding_chunks(
+                        user_id,
+                        query_embedding,
+                        connection_id=connection_id,
+                        limit=ASK_AI_MAX_SOURCES * 2,
+                    )
+                except Exception as exc:
+                    # Ask AI remains usable through the existing word search
+                    # when the free embedding endpoint or vector search fails.
+                    logger.warning(
+                        "Semantic email search unavailable (%s); using word search results.",
+                        type(exc).__name__,
+                    )
+                matches = _merge_hybrid_email_matches(word_matches, semantic_chunks)
                 if not matches:
                     answer = "I couldn't find a matching email in the last 24 hours."
-                    record_metadata(span, status="no_matches", source_count=0)
+                    record_metadata(span, status="no_matches", source_count=0, semantic_count=0)
                     log_timing("chat.total", started, source_count=0)
                     return {"answer": answer, "sources": []}
 
@@ -709,7 +940,13 @@ def answer_question_about_recent_emails(
                     }
                     for email_id in selected_ids
                 ]
-                record_metadata(span, status="success", source_count=len(sources))
+                record_metadata(
+                    span,
+                    status="success",
+                    source_count=len(sources),
+                    semantic_count=len(semantic_chunks),
+                    word_count=len(word_matches),
+                )
                 log_timing("chat.total", started, source_count=len(sources))
                 return {"answer": answer.strip(), "sources": sources}
             except Exception as exc:

@@ -21,6 +21,97 @@ OPENROUTER_URL = os.getenv(
 OPENROUTER_MODEL = os.getenv(
     "OPENROUTER_MODEL", "nvidia/nemotron-3.5-lightning:free"
 )
+OPENROUTER_EMBEDDING_URL = os.getenv(
+    "OPENROUTER_EMBEDDING_URL", "https://openrouter.ai/api/v1/embeddings"
+)
+OPENROUTER_EMBEDDING_MODEL = os.getenv(
+    "OPENROUTER_EMBEDDING_MODEL", "nvidia/nemotron-3-embed-1b:free"
+)
+EMBEDDING_DIMENSIONS = 2048
+
+
+def embed_texts(texts: list[str], *, input_type: str) -> list[list[float]]:
+    """Create query or passage embeddings through OpenRouter."""
+    if input_type not in {"query", "passage"}:
+        raise ValueError("Embedding input_type must be 'query' or 'passage'.")
+    if not texts or any(not isinstance(text, str) or not text.strip() for text in texts):
+        raise ValueError("Embedding input must contain non-empty text.")
+
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        raise RuntimeError("Set OPENROUTER_API_KEY on the server first.")
+
+    payload = {
+        "model": OPENROUTER_EMBEDDING_MODEL,
+        "input": texts,
+        "input_type": input_type,
+        "encoding_format": "float",
+    }
+    request = Request(
+        OPENROUTER_EMBEDDING_URL,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "X-OpenRouter-Title": "Today's Mail Agent",
+        },
+    )
+    started = perf_counter()
+    try:
+        try:
+            with urlopen(request, timeout=90) as response:
+                result = json.loads(response.read())
+        except HTTPError as exc:
+            # Avoid logging the provider response body because it may echo input.
+            logger.error("OpenRouter embeddings returned HTTP %s.", exc.code)
+            if exc.code == 401:
+                raise RuntimeError("OpenRouter rejected the API key.") from exc
+            raise RuntimeError(f"OpenRouter embeddings request failed (HTTP {exc.code}).") from exc
+        except TimeoutError as exc:
+            raise RuntimeError("OpenRouter embeddings did not respond within 90 seconds.") from exc
+        except URLError as exc:
+            raise RuntimeError(f"Could not reach OpenRouter embeddings: {exc.reason}") from exc
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise RuntimeError("OpenRouter returned an invalid embeddings response.") from exc
+
+        data = result.get("data") if isinstance(result, dict) else None
+        if not isinstance(data, list) or len(data) != len(texts):
+            raise RuntimeError("OpenRouter returned the wrong number of embeddings.")
+        ordered = sorted(data, key=lambda item: item.get("index", -1) if isinstance(item, dict) else -1)
+        vectors = []
+        for item in ordered:
+            vector = item.get("embedding") if isinstance(item, dict) else None
+            if (
+                not isinstance(vector, list)
+                or len(vector) != EMBEDDING_DIMENSIONS
+                or any(not isinstance(value, (int, float)) for value in vector)
+            ):
+                raise RuntimeError(
+                    f"OpenRouter returned an invalid embedding; expected {EMBEDDING_DIMENSIONS} numbers."
+                )
+            vectors.append([float(value) for value in vector])
+        usage = result.get("usage") or {}
+        log_timing(
+            "openrouter.embeddings",
+            started,
+            model=OPENROUTER_EMBEDDING_MODEL,
+            input_type=input_type,
+            input_count=len(texts),
+            input_tokens=usage.get("total_tokens"),
+            dimensions=EMBEDDING_DIMENSIONS,
+        )
+        return vectors
+    except Exception as exc:
+        log_timing(
+            "openrouter.embeddings",
+            started,
+            status="error",
+            model=OPENROUTER_EMBEDDING_MODEL,
+            input_type=input_type,
+            input_count=len(texts),
+            error_type=type(exc).__name__,
+        )
+        raise
 
 
 def _safe_response_preview(content: object, *, limit: int = 240) -> str:

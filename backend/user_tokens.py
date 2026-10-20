@@ -558,6 +558,201 @@ def search_recent_persistent_emails(
     return matches
 
 
+def get_email_embedding_chunks(
+    user_id: str, email_ids: list[str]
+) -> dict[str, list[str]]:
+    """Load saved chunk text so unchanged email bodies are not embedded again."""
+    if not email_ids:
+        return {}
+    grouped: dict[str, list[tuple[int, str]]] = {}
+    user_filter = quote(user_id, safe="")
+    # Keep the URL manageable and return only text needed for the equality check.
+    for offset in range(0, len(email_ids), 100):
+        batch = email_ids[offset : offset + 100]
+        id_filter = quote(",".join(batch), safe=",")
+        page_offset = 0
+        while True:
+            rows = _request(
+                "GET",
+                "email_embedding_chunks?select=email_id,chunk_index,chunk_text"
+                f"&user_id=eq.{user_filter}&email_id=in.({id_filter})"
+                f"&order=email_id.asc,chunk_index.asc&limit=1000&offset={page_offset}",
+            )
+            if not isinstance(rows, list):
+                raise RuntimeError("Supabase returned invalid email embedding chunks.")
+            for row in rows:
+                if isinstance(row, dict) and row.get("email_id"):
+                    grouped.setdefault(row["email_id"], []).append(
+                        (int(row.get("chunk_index") or 0), str(row.get("chunk_text") or ""))
+                    )
+            if len(rows) < 1000:
+                break
+            page_offset += len(rows)
+    return {
+        email_id: [text for _, text in sorted(chunks)]
+        for email_id, chunks in grouped.items()
+    }
+
+
+def save_email_embedding_chunks(
+    user_id: str, email_id: str, chunks: list[dict]
+) -> None:
+    """Upsert one email's chunks, then remove stale trailing chunks."""
+    user_filter = quote(user_id, safe="")
+    email_filter = quote(email_id, safe="")
+    if not chunks:
+        _request(
+            "DELETE",
+            "email_embedding_chunks?user_id=eq." + user_filter
+            + "&email_id=eq." + email_filter,
+        )
+        return
+
+    rows = [
+        {
+            "email_id": email_id,
+            "user_id": user_id,
+            "chunk_index": index,
+            "chunk_text": chunk["chunk_text"],
+            "embedding": chunk["embedding"],
+            "embedding_model": chunk["embedding_model"],
+        }
+        for index, chunk in enumerate(chunks)
+    ]
+    _request(
+        "POST",
+        "email_embedding_chunks?on_conflict=email_id,chunk_index",
+        rows,
+        prefer="resolution=merge-duplicates,return=minimal",
+    )
+    _request(
+        "DELETE",
+        "email_embedding_chunks?user_id=eq." + user_filter
+        + "&email_id=eq." + email_filter
+        + "&chunk_index=gte." + str(len(chunks)),
+    )
+
+
+def get_recent_email_bodies_for_embedding(
+    user_id: str,
+    connection_id: str,
+    force_email_ids: list[str] | None = None,
+) -> list[dict]:
+    """Load recent bodies that have no chunks, plus changed emails to refresh."""
+    user_filter = quote(user_id, safe="")
+    connection_filter = quote(connection_id, safe="")
+    cutoff_ms = int((datetime.now(timezone.utc) - timedelta(hours=24)).timestamp() * 1000)
+    email_rows = []
+    offset = 0
+    while True:
+        page = _request(
+            "GET",
+            "emails?select=id,connection_id,sender,subject,internal_date"
+            f"&user_id=eq.{user_filter}&connection_id=eq.{connection_filter}"
+            f"&deleted=eq.false&hidden_in_app=eq.false&internal_date=gte.{cutoff_ms}"
+            f"&order=internal_date.desc&limit=500&offset={offset}",
+        )
+        if not isinstance(page, list):
+            raise RuntimeError("Supabase returned an invalid recent email list.")
+        email_rows.extend(page)
+        if len(page) < 500:
+            break
+        offset += len(page)
+
+    if not email_rows:
+        return []
+    all_ids = [row["id"] for row in email_rows if isinstance(row, dict) and row.get("id")]
+    existing_ids = set()
+    for batch_offset in range(0, len(all_ids), 100):
+        batch = all_ids[batch_offset : batch_offset + 100]
+        id_filter = quote(",".join(batch), safe=",")
+        page_offset = 0
+        while True:
+            rows = _request(
+                "GET",
+                "email_embedding_chunks?select=email_id"
+                f"&user_id=eq.{user_filter}&email_id=in.({id_filter})"
+                f"&limit=1000&offset={page_offset}",
+            )
+            if not isinstance(rows, list):
+                raise RuntimeError("Supabase returned invalid embedding references.")
+            existing_ids.update(
+                row["email_id"] for row in rows
+                if isinstance(row, dict) and row.get("email_id")
+            )
+            if len(rows) < 1000:
+                break
+            page_offset += len(rows)
+
+    forced = set(force_email_ids or [])
+    pending_ids = [email_id for email_id in all_ids if email_id not in existing_ids or email_id in forced]
+    if not pending_ids:
+        return []
+
+    bodies_by_id = {}
+    for batch_offset in range(0, len(pending_ids), 100):
+        batch = pending_ids[batch_offset : batch_offset + 100]
+        id_filter = quote(",".join(batch), safe=",")
+        rows = _request(
+            "GET",
+            "email_bodies?select=email_id,body"
+            f"&user_id=eq.{user_filter}&email_id=in.({id_filter})&limit=1000",
+        )
+        if not isinstance(rows, list):
+            raise RuntimeError("Supabase returned invalid recent email bodies.")
+        for row in rows:
+            if isinstance(row, dict) and row.get("email_id"):
+                bodies_by_id[row["email_id"]] = row.get("body") or ""
+
+    pending_set = set(pending_ids)
+    return [
+        {
+            "id": row["id"],
+            "sender": row.get("sender", ""),
+            "subject": row.get("subject", "(No subject)"),
+            "internal_date": int(row.get("internal_date") or 0),
+            "body": bodies_by_id.get(row["id"], ""),
+        }
+        for row in email_rows
+        if row.get("id") in pending_set
+    ]
+
+
+def search_email_embedding_chunks(
+    user_id: str,
+    query_embedding: list[float],
+    connection_id: str | None = None,
+    limit: int = 10,
+) -> list[dict]:
+    """Search the user's last-day email chunks by cosine similarity."""
+    if len(query_embedding) != 2048:
+        raise ValueError("The query embedding must contain 2048 numbers.")
+    started = perf_counter()
+    bounded_limit = max(1, min(int(limit), 20))
+    # PostgREST passes the pgvector value as its standard bracketed text form.
+    vector_text = "[" + ",".join(format(float(value), ".9g") for value in query_embedding) + "]"
+    rows = _request(
+        "POST",
+        "rpc/search_email_chunks",
+        {
+            "p_user_id": user_id,
+            "p_connection_id": connection_id,
+            "p_query_embedding": vector_text,
+            "p_limit": bounded_limit,
+        },
+    )
+    if not isinstance(rows, list):
+        raise RuntimeError("Supabase returned an invalid semantic email search result.")
+    matches = [row for row in rows if isinstance(row, dict) and row.get("email_id")]
+    log_timing(
+        "chat.semantic_search",
+        started,
+        result_count=len(matches),
+        limit=bounded_limit,
+    )
+    return matches
+
+
 def list_gmail_connections() -> list[dict[str, str]]:
     """List connected mailbox IDs and owners, without returning tokens."""
     rows = _request(

@@ -51,10 +51,13 @@ const reminderFormStatus = document.querySelector("#reminder-form-status");
 let emails = [];
 let gmailAccounts = [];
 let reminders = [];
+let scheduledSends = [];
 let selectedEmail = null;
 let reminderEditingId = null;
 let activeReminderTab = "upcoming";
 let remindersLoaded = false;
+let remindersLoadInFlight = false;
+let scheduleBeingEdited = null;
 let composeMode = "new";
 let composeReplyEmail = null;
 let askAiHistory = [];
@@ -124,6 +127,7 @@ async function initAppAuth() {
         emails = [];
         gmailAccounts = [];
         reminders = [];
+        scheduledSends = [];
         remindersLoaded = false;
         resetAskAiChat();
         showPage("inbox");
@@ -477,7 +481,7 @@ function showPage(page) {
 }
 
 window.setInterval(() => {
-  if (document.visibilityState === "visible" && !remindersView.hidden && remindersLoaded) renderReminders();
+  if (document.visibilityState === "visible" && !remindersView.hidden && remindersLoaded) void loadReminders();
 }, 30 * 1000);
 
 function setReminderStatus(element, message, isError = false) {
@@ -499,16 +503,23 @@ async function reminderRequest(path, options = {}) {
 }
 
 async function loadReminders() {
-  if (!currentSession) return;
+  if (!currentSession || remindersLoadInFlight) return;
+  remindersLoadInFlight = true;
   setReminderStatus(remindersStatus, "Loading reminders…");
   try {
-    const payload = await reminderRequest("/api/dashboard/reminders");
-    reminders = Array.isArray(payload.reminders) ? payload.reminders : [];
+    const [reminderPayload, scheduledPayload] = await Promise.all([
+      reminderRequest("/api/dashboard/reminders"),
+      reminderRequest("/api/dashboard/scheduled"),
+    ]);
+    reminders = Array.isArray(reminderPayload.reminders) ? reminderPayload.reminders : [];
+    scheduledSends = Array.isArray(scheduledPayload.scheduled) ? scheduledPayload.scheduled : [];
     remindersLoaded = true;
     renderReminders();
     setReminderStatus(remindersStatus, "");
   } catch (error) {
     setReminderStatus(remindersStatus, error.message || "Could not load reminders.", true);
+  } finally {
+    remindersLoadInFlight = false;
   }
 }
 
@@ -518,14 +529,66 @@ function renderReminders() {
   const past = reminders.filter((item) => new Date(item.remind_at).getTime() <= now);
   document.querySelector("#upcoming-count").textContent = String(upcoming.length);
   document.querySelector("#past-count").textContent = String(past.length);
-  const count = upcoming.length + past.length;
+  document.querySelector("#scheduled-count").textContent = String(scheduledSends.length);
+  const count = upcoming.length + past.length + scheduledSends.filter((item) => item.status === "pending").length;
   const badge = document.querySelector("#reminders-count");
   badge.textContent = String(count);
   badge.hidden = count === 0;
-  const shown = activeReminderTab === "upcoming" ? upcoming : past;
-  reminderList.replaceChildren(...shown.map((item) => makeReminderCard(item, activeReminderTab === "past")));
+  const shown = activeReminderTab === "scheduled"
+    ? scheduledSends
+    : activeReminderTab === "upcoming" ? upcoming : past;
+  reminderList.replaceChildren(...shown.map((item) => activeReminderTab === "scheduled"
+    ? makeScheduledCard(item)
+    : makeReminderCard(item, activeReminderTab === "past")));
   reminderList.hidden = shown.length === 0;
-  document.querySelector("#reminders-empty").hidden = shown.length > 0;
+  const empty = document.querySelector("#reminders-empty");
+  empty.hidden = shown.length > 0;
+  empty.querySelector("h2").textContent = activeReminderTab === "scheduled" ? "No scheduled emails" : "No reminders here";
+  empty.querySelector("p").textContent = activeReminderTab === "scheduled"
+    ? "Replies and new emails you schedule will appear here."
+    : "Open an email and choose ‘Remind me’ to save it for later.";
+}
+
+function makeScheduledCard(item) {
+  const card = document.createElement("article");
+  card.className = `reminder-card scheduled-card scheduled-${item.status}`;
+  const mark = document.createElement("span");
+  mark.className = "reminder-card-mark";
+  mark.textContent = item.kind === "reply" ? "↩" : "↗";
+  const content = document.createElement("div");
+  content.className = "reminder-card-content";
+  const date = document.createElement("div");
+  date.className = "reminder-card-date";
+  date.textContent = formatFullReceived(item.send_at);
+  const subject = document.createElement("h2");
+  subject.textContent = `${item.kind === "reply" ? "Reply: " : "Email: "}${item.subject || "(No subject)"}`;
+  const sender = document.createElement("p");
+  sender.className = "reminder-card-sender";
+  sender.textContent = `To ${item.recipient_email || "unknown recipient"}${item.from_email ? ` · from ${item.from_email}` : ""}`;
+  const status = document.createElement("p");
+  status.className = "reminder-card-note scheduled-card-status";
+  status.textContent = item.status === "pending" ? "Scheduled"
+    : item.status === "sending" ? "Sending now"
+      : item.status === "delivery_unknown" ? (item.last_error || "Check Gmail Sent to confirm delivery before retrying.")
+        : (item.last_error || "Could not send. Review this email before scheduling again.");
+  content.append(date, subject, sender, status);
+  const actions = document.createElement("div");
+  actions.className = "reminder-card-actions";
+  if (item.status === "pending") {
+    const change = document.createElement("button");
+    change.type = "button";
+    change.className = "reminder-action-link";
+    change.textContent = "Change time";
+    change.addEventListener("click", () => openScheduleEdit(item));
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "reminder-delete-button";
+    cancel.textContent = "Cancel send";
+    cancel.addEventListener("click", () => void cancelScheduledSend(item, cancel));
+    actions.append(change, cancel);
+  }
+  card.append(mark, content, actions);
+  return card;
 }
 
 function makeReminderCard(reminder, isPast) {
@@ -677,6 +740,63 @@ async function deleteReminder(id, button) {
   } catch (error) {
     button.disabled = false;
     setReminderStatus(remindersStatus, error.message || "Could not delete reminder.", true);
+  }
+}
+
+const scheduleEditDialog = document.querySelector("#schedule-edit-dialog");
+const scheduleEditForm = document.querySelector("#schedule-edit-form");
+const scheduleEditAt = document.querySelector("#schedule-edit-at");
+const scheduleEditStatus = document.querySelector("#schedule-edit-status");
+
+function openScheduleEdit(item) {
+  scheduleBeingEdited = item;
+  scheduleEditForm.reset();
+  scheduleEditAt.min = toLocalDateTimeInput(new Date(Date.now() + 2 * 60 * 1000).toISOString());
+  scheduleEditAt.value = toLocalDateTimeInput(item.send_at);
+  document.querySelector("#schedule-edit-subject").textContent = `${item.kind === "reply" ? "Reply: " : "Email: "}${item.subject || "(No subject)"}`;
+  setReminderStatus(scheduleEditStatus, "");
+  scheduleEditDialog.showModal();
+}
+
+scheduleEditForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!scheduleBeingEdited || !scheduleEditAt.value) return;
+  const sendAt = new Date(scheduleEditAt.value);
+  if (Number.isNaN(sendAt.getTime()) || sendAt.getTime() <= Date.now()) {
+    return setReminderStatus(scheduleEditStatus, "Choose a future time.", true);
+  }
+  const button = document.querySelector("#save-schedule-edit");
+  button.disabled = true;
+  setReminderStatus(scheduleEditStatus, "Saving…");
+  try {
+    await reminderRequest(
+      `/api/dashboard/scheduled/${encodeURIComponent(scheduleBeingEdited.kind)}/${encodeURIComponent(scheduleBeingEdited.id)}`,
+      { method: "PATCH", body: JSON.stringify({ send_at: sendAt.toISOString() }) },
+    );
+    scheduleEditDialog.close();
+    await loadReminders();
+    setReminderStatus(remindersStatus, "Send time updated.");
+  } catch (error) {
+    setReminderStatus(scheduleEditStatus, error.message || "Could not change the send time.", true);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+async function cancelScheduledSend(item, button) {
+  if (!window.confirm("Cancel this scheduled email? It will not be sent.")) return;
+  button.disabled = true;
+  try {
+    await reminderRequest(
+      `/api/dashboard/scheduled/${encodeURIComponent(item.kind)}/${encodeURIComponent(item.id)}`,
+      { method: "DELETE" },
+    );
+    scheduledSends = scheduledSends.filter((scheduled) => scheduled.id !== item.id || scheduled.kind !== item.kind);
+    renderReminders();
+    setReminderStatus(remindersStatus, "Scheduled email cancelled.");
+  } catch (error) {
+    button.disabled = false;
+    setReminderStatus(remindersStatus, error.message || "Could not cancel the scheduled email.", true);
   }
 }
 
@@ -1356,6 +1476,11 @@ document.querySelector("#close-reminder-dialog").addEventListener("click", () =>
 document.querySelector("#cancel-reminder").addEventListener("click", () => reminderDialog.close());
 reminderDialog.addEventListener("click", (event) => {
   if (event.target === reminderDialog) reminderDialog.close();
+});
+document.querySelector("#close-schedule-edit").addEventListener("click", () => scheduleEditDialog.close());
+document.querySelector("#cancel-schedule-edit").addEventListener("click", () => scheduleEditDialog.close());
+scheduleEditDialog.addEventListener("click", (event) => {
+  if (event.target === scheduleEditDialog) scheduleEditDialog.close();
 });
 chatAccountScope.addEventListener("change", () => {
   if (activeAccountFilter !== chatAccountScope.value) resetAskAiChat();

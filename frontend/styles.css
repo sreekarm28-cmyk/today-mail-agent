@@ -293,6 +293,10 @@ button:disabled { cursor: wait; opacity: .58; }
 .reminder-card-content h2 { overflow: hidden; margin: 0 0 4px; color: #3e3945; font: 700 12px/1.45 Manrope,sans-serif; text-overflow: ellipsis; }
 .reminder-card-sender { overflow: hidden; margin: 0; color: #918c98; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .reminder-card-note { margin: 10px 0 0; padding: 9px 11px; border-left: 2px solid #d9d0ef; border-radius: 0 8px 8px 0; background: #faf9fc; color: #716c78; font-size: 9px; line-height: 1.6; white-space: pre-wrap; }
+.scheduled-card-status { border-left-color: #c9c2d6; background: #f8f7fa; white-space: normal; }
+.scheduled-delivery_unknown .scheduled-card-status { border-left-color: #d49a4d; background: #fff8ee; color: #855b25; }
+.scheduled-failed .scheduled-card-status { border-left-color: #cb7a70; background: #fff6f4; color: #934e47; }
+.scheduled-sending .scheduled-card-status { border-left-color: #78a79b; background: #f1f8f6; color: #477568; }
 .reminder-card-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 7px; }
 .reminder-action-link, .reminder-delete-button { min-height: 29px; padding: 0 9px; border: 1px solid #e9e5ed; border-radius: 8px; background: #fff; color: #625a75; font-size: 8px; font-weight: 700; white-space: nowrap; }
 .reminder-action-link:hover { border-color: #cfc5e8; background: #f8f6fc; color: #51408f; }

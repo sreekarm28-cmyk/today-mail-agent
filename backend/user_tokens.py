@@ -650,6 +650,68 @@ def save_scheduled_message(user_id: str, values: dict) -> dict:
     return rows[0]
 
 
+def list_user_scheduled_sends(user_id: str) -> list[dict]:
+    """List this user's scheduled sends without returning their message bodies."""
+    user_filter = quote(user_id, safe="")
+    visible_statuses = "(pending,sending,delivery_unknown,failed)"
+    replies = _request(
+        "GET",
+        "scheduled_replies?select=id,connection_id,recipient_email,subject,send_at,status,last_error"
+        f"&user_id=eq.{user_filter}&status=in.{visible_statuses}&order=send_at.asc&limit=100",
+    )
+    messages = _request(
+        "GET",
+        "scheduled_messages?select=id,connection_id,recipient_email,subject,send_at,status,last_error"
+        f"&user_id=eq.{user_filter}&status=in.{visible_statuses}&order=send_at.asc&limit=100",
+    )
+    if not isinstance(replies, list) or not isinstance(messages, list):
+        raise RuntimeError("Supabase returned an invalid scheduled-send list.")
+    accounts = list_user_gmail_connections(user_id)
+    account_by_id = {str(row["id"]): row.get("gmail_email", "") for row in accounts}
+    items = [
+        {
+            **row,
+            "kind": "reply",
+            "from_email": account_by_id.get(str(row.get("connection_id")), ""),
+        }
+        for row in replies
+    ] + [
+        {
+            **row,
+            "kind": "email",
+            "from_email": account_by_id.get(str(row.get("connection_id")), ""),
+        }
+        for row in messages
+    ]
+    return sorted(items, key=lambda item: item.get("send_at", ""))
+
+
+def update_user_scheduled_send_time(
+    user_id: str, kind: str, schedule_id: str, send_at: str
+) -> bool:
+    table = "scheduled_replies" if kind == "reply" else "scheduled_messages"
+    rows = _request(
+        "PATCH",
+        f"{table}?select=id&"
+        f"id=eq.{quote(schedule_id, safe='')}&user_id=eq.{quote(user_id, safe='')}&status=eq.pending",
+        {"send_at": send_at},
+        prefer="return=representation",
+    )
+    return isinstance(rows, list) and bool(rows)
+
+
+def cancel_user_scheduled_send(user_id: str, kind: str, schedule_id: str) -> bool:
+    table = "scheduled_replies" if kind == "reply" else "scheduled_messages"
+    rows = _request(
+        "PATCH",
+        f"{table}?select=id&"
+        f"id=eq.{quote(schedule_id, safe='')}&user_id=eq.{quote(user_id, safe='')}&status=eq.pending",
+        {"status": "cancelled", "last_error": None},
+        prefer="return=representation",
+    )
+    return isinstance(rows, list) and bool(rows)
+
+
 def claim_due_scheduled_replies(limit: int = 20) -> list[dict]:
     """Atomically claim due replies so overlapping timer runs do not duplicate work."""
     rows = _request("POST", "rpc/claim_due_scheduled_replies", {"p_limit": limit})

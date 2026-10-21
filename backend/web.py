@@ -57,6 +57,9 @@ from .user_tokens import (
     update_user_reminder,
     complete_user_reminder,
     delete_user_reminder,
+    list_user_scheduled_sends,
+    update_user_scheduled_send_time,
+    cancel_user_scheduled_send,
     list_user_gmail_connections,
     save_gmail_connection,
 )
@@ -127,6 +130,10 @@ class ComposeMessageRequest(BaseModel):
 
 
 class ScheduledMessageRequest(ComposeMessageRequest):
+    send_at: datetime
+
+
+class ScheduledSendTimeRequest(BaseModel):
     send_at: datetime
 
 
@@ -741,6 +748,69 @@ def delete_dashboard_reminder(
     except Exception as exc:
         logger.exception("Could not delete reminder")
         raise HTTPException(status_code=400, detail="Could not delete reminder. Please try again.") from exc
+
+
+@app.get("/api/dashboard/scheduled")
+def dashboard_scheduled_sends(
+    user: dict | None = Depends(_require_app_user),
+) -> dict[str, list[dict]]:
+    """Return this user's active or uncertain scheduled messages for review."""
+    if not user:
+        raise HTTPException(status_code=401, detail="Sign in to view scheduled emails.")
+    try:
+        return {"scheduled": list_user_scheduled_sends(user["id"])}
+    except Exception as exc:
+        logger.exception("Could not load scheduled emails")
+        raise HTTPException(status_code=400, detail="Could not load scheduled emails. Please try again.") from exc
+
+
+@app.patch("/api/dashboard/scheduled/{kind}/{schedule_id}")
+def update_dashboard_scheduled_send(
+    kind: Literal["reply", "email"],
+    schedule_id: UUID,
+    payload: ScheduledSendTimeRequest,
+    user: dict | None = Depends(_require_app_user),
+) -> dict[str, str]:
+    """Change the send time of a still-pending scheduled message."""
+    if not user:
+        raise HTTPException(status_code=401, detail="Sign in to change a scheduled email.")
+    if payload.send_at.tzinfo is None or payload.send_at.utcoffset() is None:
+        raise HTTPException(status_code=422, detail="Choose a date and time with a time zone.")
+    if payload.send_at <= datetime.now(payload.send_at.tzinfo):
+        raise HTTPException(status_code=422, detail="Choose a future date and time.")
+    try:
+        updated = update_user_scheduled_send_time(
+            user["id"], kind, str(schedule_id), payload.send_at.astimezone(timezone.utc).isoformat()
+        )
+        if not updated:
+            raise HTTPException(status_code=409, detail="This item is no longer waiting to be sent.")
+        return {"status": "updated"}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Could not update scheduled email time")
+        raise HTTPException(status_code=400, detail="Could not change the send time. Please try again.") from exc
+
+
+@app.delete("/api/dashboard/scheduled/{kind}/{schedule_id}")
+def cancel_dashboard_scheduled_send(
+    kind: Literal["reply", "email"],
+    schedule_id: UUID,
+    user: dict | None = Depends(_require_app_user),
+) -> dict[str, str]:
+    """Cancel a scheduled message only while it is still pending."""
+    if not user:
+        raise HTTPException(status_code=401, detail="Sign in to cancel a scheduled email.")
+    try:
+        cancelled = cancel_user_scheduled_send(user["id"], kind, str(schedule_id))
+        if not cancelled:
+            raise HTTPException(status_code=409, detail="This item is no longer waiting to be sent.")
+        return {"status": "cancelled"}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Could not cancel scheduled email")
+        raise HTTPException(status_code=400, detail="Could not cancel the scheduled email. Please try again.") from exc
 
 
 @app.post("/api/dashboard/emails/{email_id}/reply/draft")

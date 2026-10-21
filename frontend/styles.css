@@ -292,6 +292,7 @@ button:disabled { cursor: wait; opacity: .58; }
 .reminder-card.is-past .reminder-card-date { color: #ae7050; }
 .reminder-card-content h2 { overflow: hidden; margin: 0 0 4px; color: #3e3945; font: 700 12px/1.45 Manrope,sans-serif; text-overflow: ellipsis; }
 .reminder-card-sender { overflow: hidden; margin: 0; color: #918c98; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.reminder-account-tag { display: inline-flex; max-width: 100%; width: fit-content; overflow: hidden; margin-top: 8px; padding: 5px 9px; border: 1px solid #e7e1f1; border-radius: 999px; background: #f7f5fb; color: #625778; font: 500 9px "DM Sans",sans-serif; text-overflow: ellipsis; white-space: nowrap; }
 .reminder-card-note { margin: 10px 0 0; padding: 9px 11px; border-left: 2px solid #d9d0ef; border-radius: 0 8px 8px 0; background: #faf9fc; color: #716c78; font-size: 9px; line-height: 1.6; white-space: pre-wrap; }
 .scheduled-card-status { border-left-color: #c9c2d6; background: #f8f7fa; white-space: normal; }
 .scheduled-delivery_unknown .scheduled-card-status { border-left-color: #d49a4d; background: #fff8ee; color: #855b25; }

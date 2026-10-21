@@ -564,12 +564,14 @@ def list_user_reminders(user_id: str) -> list[dict]:
     id_filter = ",".join(quote(email_id, safe="") for email_id in email_ids)
     emails = _request(
         "GET",
-        "emails?select=id,subject,sender,internal_date,deleted,hidden_in_app"
+        "emails?select=id,connection_id,subject,sender,internal_date,deleted,hidden_in_app"
         f"&user_id=eq.{user_filter}&id=in.({id_filter})&limit=500",
     )
     if not isinstance(emails, list):
         raise RuntimeError("Supabase returned invalid reminder email details.")
     email_by_id = {str(row["id"]): row for row in emails}
+    connections = list_user_gmail_connections(user_id)
+    account_by_id = {str(row["id"]): row.get("gmail_email", "") for row in connections}
     result = []
     for reminder in reminders:
         email = email_by_id.get(str(reminder.get("email_id")), {})
@@ -582,6 +584,7 @@ def list_user_reminders(user_id: str) -> list[dict]:
             **reminder,
             "subject": email.get("subject", "Email no longer available"),
             "sender": email.get("sender", ""),
+            "from_email": account_by_id.get(str(email.get("connection_id")), ""),
             "received": received,
             "email_available": bool(email) and not email.get("deleted") and not email.get("hidden_in_app"),
         })

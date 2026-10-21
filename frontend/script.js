@@ -565,13 +565,16 @@ function makeScheduledCard(item) {
   const sender = document.createElement("p");
   sender.className = "reminder-card-sender";
   sender.textContent = `To ${item.recipient_email || "unknown recipient"}${item.from_email ? ` · from ${item.from_email}` : ""}`;
+  const accountTag = makeAccountTag(item.from_email);
   const status = document.createElement("p");
   status.className = "reminder-card-note scheduled-card-status";
   status.textContent = item.status === "pending" ? "Scheduled"
     : item.status === "sending" ? "Sending now"
       : item.status === "delivery_unknown" ? (item.last_error || "Check Gmail Sent to confirm delivery before retrying.")
         : (item.last_error || "Could not send. Review this email before scheduling again.");
-  content.append(date, subject, sender, status);
+  content.append(date, subject, sender);
+  if (accountTag) content.append(accountTag);
+  content.append(status);
   const actions = document.createElement("div");
   actions.className = "reminder-card-actions";
   if (item.status === "pending") {
@@ -609,7 +612,9 @@ function makeReminderCard(reminder, isPast) {
   const sender = document.createElement("p");
   sender.className = "reminder-card-sender";
   sender.textContent = reminder.sender || "";
-  content.append(date, subject, sender);
+  const accountTag = makeAccountTag(reminder.from_email);
+  if (accountTag) content.append(date, subject, sender, accountTag);
+  else content.append(date, subject, sender);
   if (reminder.note) {
     const note = document.createElement("p");
     note.className = "reminder-card-note";
@@ -663,6 +668,15 @@ function makeReminderCard(reminder, isPast) {
   actions.append(remove);
   card.append(mark, content, actions);
   return card;
+}
+
+function makeAccountTag(address) {
+  if (!address) return null;
+  const tag = document.createElement("span");
+  tag.className = "reminder-account-tag";
+  tag.textContent = `From ${address}`;
+  tag.title = `Gmail account: ${address}`;
+  return tag;
 }
 
 function toLocalDateTimeInput(value) {
